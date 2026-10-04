@@ -165,6 +165,31 @@ overlay.engine.update(snapshot)
 with patch("autoskip.windows.foreground",return_value=456),patch("autoskip.windows.process_name",return_value="notepad.exe"):
     overlay.block("author")
 assert overlay.engine.manual is None
+# Chrome messages keep all parsed fields through video blocking and rule editing.
+message={"type":"snapshot","source":"chrome","session":"chrome-metadata","token":"metadata-video",
+         "video_id":"dy:video:1234567890123456789","author_id":"dy:author:metadata",
+         "author":"@网页作者","title":"手机续航实测 #数码","active":True,"playing":True,"timing":True,"sequence":1}
+with patch("autoskip.windows.foreground",return_value=123),patch("autoskip.windows.process_name",return_value="chrome.exe"):
+    overlay.on_message(message,lambda response:None)
+    overlay.block("video")
+snapshot=overlay.engine.current
+rules=Rules(overlay);rules.show();app.processEvents()
+index=next(i for i,rule in enumerate(rules.rows) if rule["target"]==message["video_id"])
+assert [rules.table.item(index,column).text() for column in (0,1,2,3)]==[
+    message["author"],message["title"],"https://www.douyin.com/video/1234567890123456789","仅视频"]
+rules.search.setText("网页作者");assert rules.table.rowCount()==1
+rule=rules.rows[0];editor=RuleEditor(overlay,rule,rules);editor.show();app.processEvents()
+assert editor.author.text()==message["author"] and editor.keyword.text()==message["title"]
+assert editor.condition.currentData()=="video" and editor.author.isReadOnly()
+assert editor.grab().save(str(destination/"video-rule-editor.png"))
+editor.save();assert overlay.store.rules()[0]["kind"]=="video"
+assert not overlay.engine.match(Snapshot("chrome","test","other","dy:video:999",author=message["author"],title=message["title"]))
+assert rules.grab().save(str(destination/"chrome-video-rule.png"))
+# Changing the condition explicitly converts the saved details into a filter.
+editor=RuleEditor(overlay,rule,rules);editor.condition.setCurrentIndex(editor.condition.findData("or"))
+assert not editor.author.isReadOnly();editor.author.clear();editor.link.clear();editor.save()
+assert overlay.store.rules()[0]["kind"]=="filter" and overlay.engine.match(snapshot)
+overlay.store.delete(rule["id"]);rules.close();overlay.engine.reset(preserve_watch=True)
 overlay.fold();assert overlay.details.isHidden()
 overlay.fold();assert not overlay.details.isHidden()
 overlay.pick_window();assert overlay.engine.paused and overlay.picking_at
@@ -248,6 +273,8 @@ assert "@示例视频作者 三秒内划走的数码评测 视频被加入黑名
 assert not overlay.notice.isHidden()
 assert overlay.engine.match(Snapshot("desktop","test","v2",author="@示例视频作者",title="三秒内划走的数码评测"))
 assert not overlay.engine.match(Snapshot("desktop","test","v3",author="@示例视频作者",title="另一个完全不同的视频"))
+learned=overlay.store.rules()[0]
+assert (learned["author"],learned["keyword"])==("@示例视频作者","三秒内划走的数码评测")
 overlay.grab().save(str(destination/"learned-notice.png"))
 
 # Local rules never need a cloud service, including old configured keys.

@@ -4,6 +4,37 @@
   let previous = null, navigation = null, sent = "", endedToken = "";
   let previousTime = 0, previousDuration = 0, sequence = 0, lastDecision = -1;
   const stamps = new WeakMap();
+  let stopped = false, reportTimer = null;
+  const listeners = [];
+  function stop() {
+    if (stopped) return;
+    stopped = true;
+    if (reportTimer !== null) clearInterval(reportTimer);
+    for (const [target, type, listener, options] of listeners) target.removeEventListener(type, listener, options);
+    listeners.length = 0;
+    previous = navigation = null;
+    try { chrome.runtime.onMessage.removeListener(onMessage); } catch (_) { /* The old context may already be gone. */ }
+  }
+  function contextAvailable() {
+    if (stopped) return false;
+    try { if (chrome.runtime?.id) return true; } catch (_) { /* Extension replaced during this callback. */ }
+    stop();
+    return false;
+  }
+  function sendError(error) {
+    if (/Extension context invalidated/i.test(error?.message || "")) stop();
+    else contextAvailable(); // Temporary missing receivers can recover on the next report.
+  }
+  function send(message) {
+    if (!contextAvailable()) return;
+    // Invalidated contexts can throw before sendMessage returns a Promise.
+    try { chrome.runtime.sendMessage(message).catch(sendError); }
+    catch (error) { sendError(error); }
+  }
+  function listen(target, type, listener, options) {
+    target.addEventListener(type, listener, options);
+    listeners.push([target, type, listener, options]);
+  }
   function visible(el) {
     if (!el) return false;
     const r = el.getBoundingClientRect(), s = getComputedStyle(el);
@@ -72,10 +103,11 @@
       timing:Number.isFinite(v.duration) && v.duration>0, ended:v.ended};
   }
   function report() {
+    if (!contextAvailable()) return;
     if (navigation && performance.now()-navigation.at>1500) navigation=null;
     const item=observe();
     if (!item) {
-      if (previous) chrome.runtime.sendMessage({...previous,type:"snapshot",active:false,sequence:++sequence}).catch(()=>{});
+      if (previous) send({...previous,type:"snapshot",active:false,sequence:++sequence});
       previous=null; return;
     }
     if (previous?.token !== item.token) {
@@ -92,9 +124,10 @@
     const {v,scope,...data}=item;
     data.sequence=++sequence;
     previous=data;
-    chrome.runtime.sendMessage({...data,type:"snapshot"}).catch(()=>{});
+    send({...data,type:"snapshot"});
   }
   function intent(event) {
+    if (!contextAvailable()) return;
     if (!event.isTrusted || !previous?.active) return;
     if (event.target.closest?.('input,textarea,[contenteditable="true"],[data-e2e*="comment"]')) return;
     const item=observe();
@@ -105,19 +138,18 @@
     } else if (event.key!=="ArrowDown" || event.ctrlKey || event.altKey || event.metaKey) return;
     navigation={token:item.token,at:performance.now()};
   }
-  addEventListener("wheel",intent,{capture:true,passive:true});
-  addEventListener("keydown",intent,true);
-  document.addEventListener("visibilitychange",report);
-  addEventListener("blur",report);addEventListener("focus",report);
-  document.addEventListener("pause",report,true);
-  document.addEventListener("ended",report,true);
-  document.addEventListener("seeking",()=>{navigation={token:"seek",at:performance.now()};endedToken="";},true);
-  chrome.runtime.onMessage.addListener(message => {
+  function seeking() {
+    if (!contextAvailable()) return;
+    navigation={token:"seek",at:performance.now()};endedToken="";
+  }
+  function onMessage(message) {
+    if (!contextAvailable()) return;
     if (message.type==="crop") {
       const item=observe();
       if (!item?.active || item.token!==message.token) return;
       const bounds=item.scope.getBoundingClientRect();
       const img=new Image();img.onload=()=>{
+        if (!contextAvailable()) return;
         const live=observe();if (!live?.active || live.token!==message.token) return;
         const scale=img.width/innerWidth;
         const x=Math.max(0,bounds.left),y=Math.max(0,bounds.top),w=Math.min(innerWidth,bounds.right)-x,h=Math.min(innerHeight,bounds.bottom)-y;
@@ -125,7 +157,7 @@
         const out=document.createElement("canvas"),factor=Math.min(1,960/w,960/h);
         out.width=w*factor;out.height=h*factor;
         out.getContext("2d").drawImage(img,x*scale,y*scale,w*scale,h*scale,0,0,out.width,out.height);
-        chrome.runtime.sendMessage({type:"image",session,token:live.token,active:true,image:out.toDataURL("image/jpeg",0.75)}).catch(()=>{});
+        send({type:"image",session,token:live.token,active:true,image:out.toDataURL("image/jpeg",0.75)});
       };img.src=message.image;return;
     }
     if (message.type!=="decision" || message.action!=="next") return;
@@ -139,7 +171,17 @@
     if (next) next.click();
     else document.dispatchEvent(new KeyboardEvent("keydown",{key:"ArrowDown",code:"ArrowDown",keyCode:40,which:40,bubbles:true}));
     report();
-  });
-  setInterval(report,400);
+  }
+  if (!contextAvailable()) return;
+  listen(window,"wheel",intent,{capture:true,passive:true});
+  listen(window,"keydown",intent,true);
+  listen(document,"visibilitychange",report);
+  listen(window,"blur",report);listen(window,"focus",report);
+  listen(document,"pause",report,true);
+  listen(document,"ended",report,true);
+  listen(document,"seeking",seeking,true);
+  try { chrome.runtime.onMessage.addListener(onMessage); }
+  catch (_) { stop();return; }
+  reportTimer = setInterval(report,400);
   report();
 })();

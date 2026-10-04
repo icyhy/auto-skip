@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto Skip · 抖音过滤助手",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "连接本机 Auto Skip，按你设置的作者、关键词、链接及或／与规则辅助切换。",
   "permissions": ["nativeMessaging", "activeTab"],
   "host_permissions": ["https://www.douyin.com/*"],
