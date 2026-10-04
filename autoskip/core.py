@@ -182,7 +182,9 @@ class Engine:
             # Toggling learning must not cancel a pending automatic skip.
             self.last_at=self.clock() if self.current else 0.0
 
-    def remember(self, kind, target, label, reason):
+    def remember(self, kind, target, label, reason, *, author):
+        if not author_name(author):
+            raise ValueError("未能识别作者，本次未加入黑名单")
         change = self.store.add_rule(kind, target, label, reason)
         self.undo_stack.append(change)
         self.undo_stack = self.undo_stack[-30:]
@@ -205,7 +207,7 @@ class Engine:
         if kind=="author" and (not target or target in INVALID_AUTHOR_IDS):target=author_name_key(snap.author)
         if not target:
             raise ValueError("当前未取得可靠的" + ("作者账号标识" if kind == "author" else "视频标识") + "，未执行拉黑")
-        self.remember(kind, target, snap.author if kind == "author" else snap.title or target, "手动拉黑")
+        self.remember(kind, target, snap.author if kind == "author" else snap.title or target, "手动拉黑",author=snap.author)
         self.manual = snap.key
         self.suppressed = None
 
@@ -240,10 +242,10 @@ class Engine:
             if (contiguous and old.source == snap.source and old.session == snap.session
                     and old.source != "desktop"
                     and snap.user_from == old.token and self.listen_enabled
-                    and old.video_id and old.timing and not old.ended
+                    and old.video_id and author_name(old.author) and old.timing and not old.ended
                     and self.pending is None and 0 < self.watched < threshold):
                 self.remember("video", old.video_id, old.title or old.video_id,
-                              f"手动跳过，观察到播放 {self.watched:.1f} 秒")
+                              f"手动跳过，观察到播放 {self.watched:.1f} 秒",author=old.author)
                 self.status = "已记住刚刚跳过的视频"
             self.watched = 0.0
             self.budget = self.budget_identity = None

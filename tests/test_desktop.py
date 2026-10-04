@@ -135,6 +135,32 @@ class BoundWindow(unittest.TestCase):
         self.reader.read(config)
         self.assertEqual(self.reader.fast_ocr.read.call_count,2)
 
+    def test_reparse_replaces_cached_author_once_using_manual_ocr(self):
+        config={**self.automatic("@错误作者\n手机续航实测结果"),**self.exclusions()}
+        first,_,_=self.reader.read(config)
+        self.reader.ocr=Mock(return_value=([[[],"@正确作者",.99],[[],"手机续航实测结果",.99]],None))
+        corrected,_,_=self.reader.read({**config,"mode":"reparse"})
+        self.assertEqual(corrected.author,"@正确作者")
+        self.assertNotEqual(corrected.token,first.token)
+        self.assertFalse(corrected.user_from or corrected.timing or corrected.ended)
+        self.assertEqual(self.reader.ocr.call_args.args[0].shape,(500,900,3))
+        for _ in range(3):
+            self.assertEqual(self.reader.read(config)[0].author,"@正确作者")
+        self.reader.ocr.assert_called_once()
+        self.reader.fast_ocr.read.assert_called_once()
+        self.controls.assert_not_called()
+
+    def test_failed_reparse_keeps_previous_author_cache_and_allows_retry(self):
+        config=self.automatic()
+        first,_,_=self.reader.read(config)
+        self.reader.ocr=Mock(return_value=([],None))
+        self.assertFalse(self.reader.read({**config,"mode":"reparse"})[0].author)
+        self.assertEqual(self.reader.read(config)[0].key,first.key)
+        self.reader.ocr.return_value=([[[],"@修正作者",.99]],None)
+        self.assertEqual(self.reader.read({**config,"mode":"reparse"})[0].author,"@修正作者")
+        self.assertEqual(self.reader.read(config)[0].author,"@修正作者")
+        self.assertEqual(self.reader.ocr.call_count,2)
+
     def test_manual_switch_discards_old_frame_and_recognizes_same_author_new_video(self):
         config=self.automatic()
         first,_,_=self.reader.read(config)

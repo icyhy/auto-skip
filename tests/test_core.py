@@ -49,6 +49,21 @@ class Scenarios(unittest.TestCase):
         self.assertEqual([r["target"] for r in rules],["dy:video:1"])
         self.assertFalse(any(r["kind"]=="author" for r in self.store.rules()))
 
+    def test_learning_requires_departing_author_even_with_video_and_account_ids(self):
+        for author in ("", " \t\u200b", "＠ ·"):
+            with self.subTest(author=author):
+                self.engine.reset()
+                snap=replace(self.first,author=author)
+                self.engine.update(snap);self.tick(snap)
+                self.tick(replace(self.first,token="v2",video_id="dy:video:2",user_from="v1"))
+                self.assertEqual(self.video_rules(),[])
+                self.assertEqual(self.engine.undo_stack,[])
+                self.assertFalse(any(r["action"]=="拉黑" for r in self.store.history()))
+        self.engine.reset()
+        self.engine.update(self.first);self.tick(self.first)
+        self.tick(replace(self.first,token="v2",video_id="dy:video:2",author="",user_from="v1"))
+        self.assertEqual([r["target"] for r in self.video_rules()],[self.first.video_id])
+
     def test_threshold_is_strict_and_configurable(self):
         self.engine.update(self.first)
         for _ in range(4):self.tick(self.first)
@@ -146,8 +161,30 @@ class Scenarios(unittest.TestCase):
         self.engine.update(replace(self.first,author_id=""))
         with self.assertRaises(ValueError):self.engine.manual_block("author")
 
+    def test_manual_block_requires_author_even_with_reliable_ids(self):
+        for source,kind,author in product(("chrome","desktop"),("author","video"),(""," \t\u200b","＠ ·")):
+            with self.subTest(source=source,kind=kind,author=author):
+                snap=replace(self.first,source=source,author=author)
+                self.engine.update(snap)
+                with self.assertRaisesRegex(ValueError,"未能识别作者"):
+                    self.engine.manual_block(kind)
+                self.assertEqual(self.store.rules(),[])
+                self.assertEqual(self.engine.undo_stack,[])
+                self.assertIsNone(self.engine.manual)
+                self.assertIsNone(self.tick(snap))
+                self.assertFalse(any(r["action"]=="拉黑" for r in self.store.history()))
+
+    def test_remember_without_author_does_not_reenable_disabled_rule(self):
+        rule=self.store.add_rule("video",self.first.video_id,self.first.title,"手动")
+        self.store.enable(rule["id"],False)
+        with self.assertRaisesRegex(ValueError,"未能识别作者"):
+            self.engine.remember("video",self.first.video_id,self.first.title,"手动",author="")
+        self.assertFalse(self.store.rules(enabled=True))
+        self.assertEqual(self.engine.undo_stack,[])
+        self.assertFalse(any(r["action"]=="拉黑" for r in self.store.history()))
+
     def test_named_author_matches_desktop_ocr_without_account_id(self):
-        self.engine.remember("author","dy:author:self","@红衣大叔周鸿祎","手动拉黑")
+        self.engine.remember("author","dy:author:self","@红衣大叔周鸿祎","手动拉黑",author="@红衣大叔周鸿祎")
         snap=replace(self.first,source="desktop",author_id="",author="＠红衣大叔周 鸿 祎 。 3 小 时 前",title="另一个视频")
         self.engine.set_features(listen=False,auto=True)
         action=self.tick(snap)
@@ -156,12 +193,12 @@ class Scenarios(unittest.TestCase):
         self.assertIsNone(self.tick(snap))
 
     def test_author_name_does_not_match_typo_prefix_or_unrelated_mention(self):
-        self.engine.remember("author","dy:author:self","@红衣大叔周鸿祎","手动拉黑")
+        self.engine.remember("author","dy:author:self","@红衣大叔周鸿祎","手动拉黑",author="@红衣大叔周鸿祎")
         for name in ["@红衣大叔周鸿帏","@红衣大叔周鸿祎讲解","@其他作者",""]:
             self.assertFalse(self.engine.match(replace(self.first,author_id="",author=name,text="提到@红衣大叔周鸿祎")))
 
     def test_valid_account_ids_take_priority_over_same_nickname(self):
-        self.engine.remember("author","dy:author:MS4_one","@同名作者","手动")
+        self.engine.remember("author","dy:author:MS4_one","@同名作者","手动",author="@同名作者")
         self.assertFalse(self.engine.match(replace(self.first,author="@同名作者",author_id="dy:author:MS4_two")))
         self.assertTrue(self.engine.match(replace(self.first,author="@同名作者",author_id="")))
 
@@ -302,7 +339,7 @@ class Scenarios(unittest.TestCase):
 
     def test_daily_limit_and_data_survive_restart(self):
         self.assertTrue(self.store.reserve_call(1));self.assertFalse(self.store.reserve_call(1))
-        self.engine.remember("video","dy:video:1","title","manual")
+        self.engine.remember("video","dy:video:1","title","manual",author=self.first.author)
         self.store.db.close();self.store=Store(self.test_dir/"data.db")
         self.assertEqual(self.store.calls(),1)
         self.assertTrue(any(r["target"]=="dy:video:1" for r in self.store.rules()))

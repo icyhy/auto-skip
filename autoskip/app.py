@@ -3,20 +3,21 @@ from copy import deepcopy
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QLockFile, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint, QLockFile, QEvent, QSaveFile, QIODevice
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QFont, QFontDatabase, QImage, QPen
 from PySide6.QtWidgets import (
     QApplication, QWidget, QFrame, QLabel, QPushButton, QToolButton, QMenu,
     QHBoxLayout, QVBoxLayout, QFormLayout, QDialog, QTabWidget, QComboBox,
     QDoubleSpinBox, QSpinBox, QLineEdit, QCheckBox, QSlider, QDialogButtonBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox,
-    QSystemTrayIcon, QAbstractItemView,
+    QSystemTrayIcon, QAbstractItemView, QFileDialog,
 )
-from . import windows, bridge
+from . import windows, bridge, __version__, RELEASE_DATE, AUTHOR_EMAIL
 from .core import Engine, Snapshot, purchase_evidence
 from .store import Store
 from .desktop import DesktopReader
@@ -72,11 +73,14 @@ class PlayerRegionPreview(QWidget):
         super().__init__(parent,Qt.WindowType.ToolTip|Qt.WindowType.FramelessWindowHint|
             Qt.WindowType.WindowStaysOnTopHint|Qt.WindowType.WindowDoesNotAcceptFocus|Qt.WindowType.WindowTransparentForInput)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.pixmap=QPixmap()
 
     def display(self,image,area):
-        image=image.convert("RGB")
-        self.pixmap=QPixmap.fromImage(QImage(image.tobytes(),image.width,image.height,image.width*3,QImage.Format.Format_RGB888).copy())
+        self.pixmap=QPixmap()
+        if image is not None:
+            image=image.convert("RGB")
+            self.pixmap=QPixmap.fromImage(QImage(image.tobytes(),image.width,image.height,image.width*3,QImage.Format.Format_RGB888).copy())
         self.show()
         # Use physical coordinates so negative monitor origins and DPI scaling agree with WGC.
         if not windows.user32.SetWindowPos(int(self.winId()),-1,area[0],area[1],area[2]-area[0],area[3]-area[1],0x10|0x40):
@@ -84,7 +88,8 @@ class PlayerRegionPreview(QWidget):
         self.update()
 
     def paintEvent(self,event):
-        painter=QPainter(self);painter.drawPixmap(self.rect(),self.pixmap)
+        painter=QPainter(self)
+        if not self.pixmap.isNull():painter.drawPixmap(self.rect(),self.pixmap)
         painter.setPen(QPen(QColor("#00ff00"),3));painter.drawRect(self.rect().adjusted(1,1,-2,-2))
 
 
@@ -150,6 +155,14 @@ class Settings(QDialog):
         self.player_index=None;self.select_player(self.player_type.currentIndex())
         self.player_type.currentIndexChanged.connect(self.select_player)
         tabs.addTab(players,"播放器区域")
+        about=QWidget();af=QVBoxLayout(about)
+        title=QLabel("Auto Skip");title.setStyleSheet("font-size:20px;font-weight:600");af.addWidget(title)
+        details=QFormLayout();af.addLayout(details)
+        for label,value in (("版本号",__version__),("最新发布日期",RELEASE_DATE),("作者邮箱",AUTHOR_EMAIL)):
+            field=QLabel(value)
+            field.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse|Qt.TextInteractionFlag.TextSelectableByKeyboard)
+            details.addRow(label,field)
+        af.addStretch();tabs.addTab(about,"关于")
         tabs.currentChanged.connect(self.stop_region_preview)
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
@@ -370,8 +383,50 @@ class Statistics(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.table)
         row=QHBoxLayout();layout.addLayout(row)
+        row.addWidget(button("导出记录",self.export_records));row.addWidget(button("导入记录",self.import_records))
+        row.addWidget(button("重置统计",self.reset_records));row.addStretch()
         row.addWidget(button("刷新统计",self.refresh));row.addWidget(button("关闭",self.accept))
         self.refresh()
+
+    def export_records(self):
+        path,_=QFileDialog.getSaveFileName(self,"导出观看记录","AutoSkip-观看记录.json","JSON 文件 (*.json)")
+        if not path:return
+        try:
+            data=self.host.store.export_watches()
+            raw=json.dumps(data,ensure_ascii=False,indent=2,allow_nan=False).encode("utf-8")
+            file=QSaveFile(path)
+            if not file.open(QIODevice.OpenModeFlag.WriteOnly):raise OSError(file.errorString())
+            if file.write(raw)!=len(raw):
+                file.cancelWriting();raise OSError(file.errorString())
+            if not file.commit():raise OSError(file.errorString())
+            QMessageBox.information(self,"导出完成",f"已导出 {len(data['watches'])} 条观看记录。")
+        except (ValueError,OSError,sqlite3.Error) as error:
+            QMessageBox.warning(self,"导出失败",str(error))
+
+    def import_records(self):
+        path,_=QFileDialog.getOpenFileName(self,"导入观看记录（合并并去重）","","JSON 文件 (*.json)")
+        if not path:return
+        try:
+            data=json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            added=self.host.store.import_watches(data)
+            self.host.engine.reset(preserve_watch=True)
+            self.refresh()
+            QMessageBox.information(self,"导入完成",f"新增 {added} 条观看记录；已存在的记录不重复导入。统计按当前阈值重新计算。")
+        except (ValueError,OSError,sqlite3.Error) as error:
+            QMessageBox.warning(self,"导入失败",str(error))
+
+    def reset_records(self):
+        if QMessageBox.question(self,"重置观看统计",
+                "将清空全部观看记录（含旧版记录），并取消当前未完成的计时及历史时长预测。\n"
+                "黑名单和设置保留。建议先导出备份。是否重置？",
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        try:
+            self.host.store.reset_watches()
+            self.host.engine.reset()
+            self.refresh()
+        except sqlite3.Error as error:
+            QMessageBox.warning(self,"重置失败",str(error))
 
     def refresh(self):
         stats=self.host.store.statistics()
@@ -388,6 +443,8 @@ class Statistics(QDialog):
 
 
 class Overlay(QWidget):
+    region_captured=Signal(int,object,str)
+
     def __init__(self, preview=False):
         super().__init__()
         self.preview=preview
@@ -415,6 +472,8 @@ class Overlay(QWidget):
         self.notice_until=0.0
         self.binding=windows.WindowBinding();self.picking_at=0.0;self.discovered_at=0.0;self.desktop_next_at=0.0
         self.desktop_switch_at=0.0
+        self.region_request=0;self.region_preview=PlayerRegionPreview(self)
+        self.region_captured.connect(self.show_region)
         self.listener=None;self.dialog_open=False;self.folded=False;self.drag_start=None;self.passthrough=False
         self.last_sequence={}
         outer=QVBoxLayout(self);outer.setContentsMargins(0,0,0,0)
@@ -427,13 +486,31 @@ class Overlay(QWidget):
         self.listen_switch.toggled.connect(self.set_listening);top.addWidget(self.listen_switch)
         self.auto_switch=QCheckBox("自动");self.auto_switch.setToolTip("根据黑名单自动跳过，可与监听同时开启")
         self.auto_switch.toggled.connect(self.set_automatic);top.addWidget(self.auto_switch)
+        self.region_button=QToolButton();self.region_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pix=QPixmap(18,18);pix.fill(Qt.GlobalColor.transparent);p=QPainter(pix)
+        p.setPen(QPen(QColor("#73e2c2"),2));p.drawRect(2,2,13,13)
+        p.drawLine(6,9,12,9);p.drawLine(9,6,9,12);p.end()
+        self.region_button.setIcon(QIcon(pix));self.region_button.setFixedSize(32,32);self.region_button.setStyleSheet("padding:6px")
+        self.region_button.setToolTip("按住鼠标左键显示有效播放区域边框，松开隐藏")
+        self.region_button.setAccessibleName("预览有效播放区域")
+        self.region_button.pressed.connect(self.start_region_preview);self.region_button.released.connect(self.stop_region_preview)
+        top.addWidget(self.region_button)
         self.pause_button=button("开始",self.toggle_pause,True);top.addWidget(self.pause_button)
         self.fold_button=button("−",self.fold);self.fold_button.setToolTip("隐藏解析文字")
         self.fold_button.setAccessibleName("隐藏解析文字");top.addWidget(self.fold_button)
         self.details=QWidget();detail=QVBoxLayout(self.details);detail.setContentsMargins(0,0,0,0);layout.addWidget(self.details)
         self.status=QLabel();detail.addWidget(self.status)
         self.notice=QLabel();self.notice.setStyleSheet("color:#73e2c2");detail.addWidget(self.notice)
-        self.subtitle=QLabel("自动识别观看窗口 · 本地优先");self.subtitle.setObjectName("muted");detail.addWidget(self.subtitle)
+        parsed=QHBoxLayout();detail.addLayout(parsed)
+        self.reparse_button=QToolButton();self.reparse_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pix=QPixmap(18,18);pix.fill(Qt.GlobalColor.transparent);p=QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing);p.setPen(QPen(QColor("#73e2c2"),2))
+        p.drawArc(3,3,12,12,40*16,290*16);p.drawLine(14,2,14,6);p.drawLine(14,6,10,6);p.end()
+        self.reparse_button.setIcon(QIcon(pix));self.reparse_button.setFixedSize(28,28);self.reparse_button.setStyleSheet("padding:5px")
+        self.reparse_button.setToolTip("重新解析当前视频的作者和文字（一次）")
+        self.reparse_button.setAccessibleName("重新解析当前视频");self.reparse_button.clicked.connect(self.reparse)
+        parsed.addWidget(self.reparse_button,0,Qt.AlignmentFlag.AlignTop)
+        self.subtitle=QLabel("自动识别观看窗口 · 本地优先");self.subtitle.setObjectName("muted");parsed.addWidget(self.subtitle,1)
         self.auto_skip_switch=QCheckBox("按历史时长自动跳过")
         self.auto_skip_switch.setToolTip("启用自动后可选择。优先使用同一视频的有效平均观看时长，其次使用匹配关键词类别的平均时长；无有效历史时继续观看。")
         self.auto_skip_switch.toggled.connect(lambda enabled:self.set_auto_skip(enabled));layout.addWidget(self.auto_skip_switch)
@@ -484,6 +561,7 @@ class Overlay(QWidget):
         p.setPen(QColor("#64dfbd"));p.setFont(QFont("Segoe UI",30,QFont.Weight.Bold));p.drawText(pix.rect(),Qt.AlignmentFlag.AlignCenter,"»");p.end();return QIcon(pix)
 
     def reload_settings(self):
+        self.stop_region_preview()
         self.config={key:self.store.get(key) for key in ("source","player_type","player_profiles")}
         self.setWindowOpacity(self.store.get("opacity"))
         self.engine.reset(preserve_watch=True)
@@ -525,6 +603,8 @@ class Overlay(QWidget):
         self.auto_skip_switch.blockSignals(True);self.auto_skip_switch.setChecked(self.engine.auto_skip_enabled);self.auto_skip_switch.blockSignals(False)
         self.auto_skip_switch.setEnabled(self.engine.auto_enabled)
         self.pause_button.setText("开始" if self.engine.paused else "暂停")
+        self.reparse_button.setEnabled(bool(self.binding.target) and self.accepts_source("desktop") and
+            not (self.engine.paused or self.dialog_open or self.picking_at or self.manual_busy or self.engine.pending))
         snap=self.engine.current
         text=(snap.author+" · "+snap.title).strip(" ·") if snap else {"auto":"自动识别观看窗口","chrome":"Chrome 网页版","desktop":"抖音电脑客户端"}[self.config["source"]]
         self.subtitle.setText((text or "正在读取视频信息")+" · 本地优先");self.subtitle.setToolTip(text)
@@ -543,6 +623,34 @@ class Overlay(QWidget):
 
     def show_notice(self,text):
         self.notice.setText(text);self.notice.setToolTip(text);self.notice_until=time.monotonic()+8;self.refresh()
+
+    def start_region_preview(self):
+        self.stop_region_preview();request=self.region_request
+        if self.picking_at or self.dialog_open:return
+        profile=deepcopy(next(p for p in self.config["player_profiles"] if p["name"]==self.config["player_type"]))
+        preferred=self.binding.target
+        def capture():
+            if request!=self.region_request:return
+            try:
+                target=windows.find_player_window(profile.get("process","douyin.exe"),preferred)
+                _,area=capture_region(target,{"player_type":profile["name"],"player_profiles":[profile]})
+                error=""
+            except (ValueError,OSError) as problem:area=None;error=str(problem)
+            except Exception as problem:area=None;error="区域预览失败（"+type(problem).__name__+"）"
+            self.region_captured.emit(request,area,error)
+        self.desktop_executor.submit(capture)
+
+    def show_region(self,request,area,error):
+        if request!=self.region_request or not self.region_button.isDown() or not self.isVisible():return
+        if error:self.show_notice(error);return
+        try:self.region_preview.display(None,area)
+        except OSError as problem:self.show_notice(str(problem))
+
+    def stop_region_preview(self,*args):
+        self.region_request+=1;self.region_preview.hide()
+
+    def hideEvent(self,event):
+        self.stop_region_preview();super().hideEvent(event)
 
     def on_captured(self,event,message):
         if event is None:self.show_notice(message);return
@@ -566,8 +674,9 @@ class Overlay(QWidget):
             if error:self.show_notice(error);return
             label=result["author"]+" "+result["title"]
             self.engine.remember("video",result["target"],label,
-                f"快速切换：{event.kind}，间隔 {event.elapsed:.3f} 秒，触发阈值 {event.threshold:g} 秒；划走前截图识别")
+                f"快速切换：{event.kind}，间隔 {event.elapsed:.3f} 秒，触发阈值 {event.threshold:g} 秒；划走前截图识别",author=result["author"])
             self.show_notice(label+f" 视频被加入黑名单（切换间隔 {event.elapsed:.3f} 秒）")
+        except ValueError as problem:self.show_notice(str(problem))
         finally:self.quick_skip.slots.release()
 
     def toggle_pause(self):
@@ -585,20 +694,31 @@ class Overlay(QWidget):
     def set_auto_skip(self,enabled):
         self.engine.set_features(auto_skip=enabled);self.refresh()
 
+    def reparse(self):
+        if not self.reparse_button.isEnabled():return
+        # Invalidate an older automatic read without restarting the watch interval.
+        self.engine.epoch+=1
+        self.read_manual("reparse")
+
+    def read_manual(self,kind):
+        self.manual_busy=True
+        request=(self.binding.target,kind,self.engine.epoch,self.ui_input.last_next)
+        config={**self.config,"desktop_target":self.binding.target,"mode":"reparse" if kind=="reparse" else "manual",
+            "video_switch_at":max(self.desktop_switch_at,self.ui_input.last_next)}
+        self.show_notice("正在重新解析当前视频…" if kind=="reparse" else "正在处理你手动指定的拉黑操作…")
+        def analyze_manual():
+            try:snap,_,note=self.reader.read(config)
+            except ValueError as error:snap,note=None,str(error)
+            except Exception as error:snap,note=None,"手动读取失败："+type(error).__name__
+            self.bus.manual.emit(request,snap,note)
+        self.desktop_executor.submit(analyze_manual)
+
     def block(self,kind):
-        if not self.engine.auto_enabled and self.accepts_source("desktop") and self.binding.target and not self.engine.paused:
-            if self.manual_busy:return
-            self.manual_busy=True
-            request=(self.binding.target,kind,self.engine.epoch)
-            config={**self.config,"desktop_target":self.binding.target,"mode":"manual"}
-            self.show_notice("正在处理你手动指定的拉黑操作…")
-            def analyze_manual():
-                try:snap,_,note=self.reader.read(config)
-                except Exception as error:snap,note=None,"手动读取失败："+type(error).__name__
-                self.bus.manual.emit(request,snap,note)
-            self.desktop_executor.submit(analyze_manual)
-            return
+        if self.manual_busy:return
         snap=self.engine.current
+        fresh=snap and snap.source=="desktop" and snap.author and self.binding.matches(snap.session) and time.monotonic()-self.engine.last_at<=2
+        if not self.engine.auto_enabled and self.accepts_source("desktop") and self.binding.target and not self.engine.paused and not fresh:
+            self.read_manual(kind);return
         hwnd=windows.foreground()
         if not snap or (snap.source=="chrome" and windows.process_name(hwnd)!="chrome.exe") or (snap.source=="desktop" and not self.binding.matches(snap.session)):
             self.engine.status="请确认已绑定的视频窗口正在提供画面";self.refresh();return
@@ -608,10 +728,18 @@ class Overlay(QWidget):
 
     def on_manual(self,request,snap,note):
         self.manual_busy=False
-        target,kind,epoch=request
-        if self.engine.paused or epoch!=self.engine.epoch or target!=self.binding.target:return
+        self.refresh()
+        target,kind,epoch,input_at=request
+        if (self.engine.paused or self.dialog_open or not self.accepts_source("desktop") or
+                epoch!=self.engine.epoch or target!=self.binding.target or self.ui_input.last_next>input_at):return
         if not snap:self.show_notice(note);return
         if not self.binding.matches(snap.session):return
+        if kind=="reparse":
+            if not snap.author:self.show_notice("未能识别作者，请稍后再次解析");return
+            self.engine.current=snap;self.engine.last_at=time.monotonic()
+            self.engine.views.observe(snap,self.engine.last_at)
+            self.engine.budget=self.engine.budget_identity=None
+            self.show_notice("已重新解析当前视频");return
         self.engine.update(snap)
         try:
             self.engine.manual_block(kind)
@@ -653,6 +781,7 @@ class Overlay(QWidget):
         if self.drag_start is not None:self.store.set("position",[self.x(),self.y()]);self.drag_start=None
 
     def dialog(self,kind):
+        self.stop_region_preview()
         self.dialog_open=True;self.engine.reset(preserve_watch=True)
         self.desktop_executor.submit(self.reader.close)
         try:kind(self).exec()
@@ -663,6 +792,7 @@ class Overlay(QWidget):
     def open_statistics(self):self.dialog(Statistics)
 
     def new_rule(self):
+        self.stop_region_preview()
         self.dialog_open=True;self.engine.reset(preserve_watch=True)
         try:
             RuleEditor(self).exec()
@@ -676,6 +806,7 @@ class Overlay(QWidget):
         return self.binding.target is None and windows.process_name(windows.foreground())=="chrome.exe"
 
     def pick_window(self):
+        self.stop_region_preview()
         if self.picking_at:
             self.picking_at=0;self.engine.status="已取消点选，保留原窗口绑定"
         else:
@@ -685,6 +816,7 @@ class Overlay(QWidget):
         self.refresh()
 
     def rediscover_window(self):
+        self.stop_region_preview()
         self.picking_at=0;self.binding.target=None;self.binding.title="";self.discovered_at=0
         self.engine.reset();self.desktop_executor.submit(self.reader.close)
         self.refresh()
@@ -706,6 +838,7 @@ class Overlay(QWidget):
             before=self.binding.target
             self.binding.discover();self.discovered_at=now
             if before!=self.binding.target:
+                self.stop_region_preview()
                 self.engine.reset();self.desktop_executor.submit(self.reader.close)
 
     def on_message(self,data,reply):
@@ -765,7 +898,7 @@ class Overlay(QWidget):
             self.on_navigation(self.binding.target,self.ui_input.last_next)
         if self.engine.current and not self.engine.pending and not self.desktop_busy and not self.manual_busy and time.monotonic()-self.engine.last_at>2.5:
             self.engine.reset();self.engine.status="视频连接中断，等待重新识别"
-        if self.accepts_source("desktop"):self.dispatch(self.engine.timed_action())
+        if self.accepts_source("desktop") and not self.manual_busy:self.dispatch(self.engine.timed_action())
         if self.accepts_source("desktop") and not self.desktop_busy and not self.manual_busy and time.monotonic()>=self.desktop_next_at:
             self.desktop_busy=True;context=(self.engine.epoch,self.ui_input.last_next);config={**self.config,"desktop_target":self.binding.target,
                 "mode":"auto" if self.engine.auto_enabled else "listen","threshold":float(self.store.get("threshold")),
@@ -786,7 +919,7 @@ class Overlay(QWidget):
         self.desktop_busy=False
         interval=1 if snap and snap.author and not self.engine.pending else .35
         self.desktop_next_at=time.monotonic()+interval
-        if self.engine.paused or self.dialog_open or not self.accepts_source("desktop") or epoch!=self.engine.epoch:return
+        if self.engine.paused or self.dialog_open or self.manual_busy or not self.accepts_source("desktop") or epoch!=self.engine.epoch:return
         if self.ui_input.last_next>input_at:return
         if snap is None:
             self.engine.reset(preserve_watch=True)
@@ -797,6 +930,7 @@ class Overlay(QWidget):
         self.dispatch(action);self.refresh()
 
     def quit(self):
+        self.stop_region_preview()
         self.engine.pause(True)
         self.sync_learning()
         for i in range(1,getattr(self,"hotkey_count",0)+1):windows.unregister_hotkey(int(self.winId()),i)

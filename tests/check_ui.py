@@ -180,7 +180,7 @@ assert overlay.binding.target==(123,10,20)
 overlay.binding.target=(123,10,20)
 overlay.engine.pause(False)
 overlay.engine.set_features(listen=False,auto=True)
-overlay.engine.update(Snapshot("desktop","123:10:20","v1","video-1","author-1",active=True))
+overlay.engine.update(Snapshot("desktop","123:10:20","v1","video-1","author-1",author="@桌面作者",active=True))
 with patch.object(overlay.binding,"matches",return_value=True),patch("autoskip.windows.foreground",return_value=789):
     overlay.block("author")
 assert overlay.engine.manual is not None
@@ -189,12 +189,23 @@ with patch.object(overlay.binding,"matches",return_value=True),patch("autoskip.w
     send.assert_called_once_with((123,10,20))
 # Manual user requests still get a one-off read after passive OCR is removed.
 overlay.engine.set_features(listen=True,auto=False)
-manual_snap=Snapshot("desktop","123:10:20","manual-v","manual-video","manual-author",active=True)
+manual_snap=Snapshot("desktop","123:10:20","manual-v","manual-video","manual-author",author="@手动作者",active=True)
 with patch.object(overlay.reader,"read",return_value=(manual_snap,None,"ok")) as read,patch.object(overlay.desktop_executor,"submit",side_effect=lambda work:work()),patch.object(overlay.binding,"matches",return_value=True),patch("autoskip.windows.next_video",return_value=True):
     overlay.block("author")
     read.assert_called_once()
     assert read.call_args.args[0]["mode"]=="manual"
     assert overlay.engine.match(manual_snap)
+# Missing authors cancel manual requests before saving a rule or sending input.
+for kind in ("author","video"):
+    overlay.engine.reset(preserve_watch=True)
+    missing=Snapshot("desktop","123:10:20","missing-v","missing-video","missing-author",active=True)
+    before=len(overlay.store.rules());undo=list(overlay.engine.undo_stack)
+    with patch.object(overlay.reader,"read",return_value=(missing,None,"ok")),patch.object(overlay.desktop_executor,"submit",side_effect=lambda work:work()),patch.object(overlay.binding,"matches",return_value=True),patch("autoskip.windows.next_video") as send:
+        overlay.block(kind)
+        send.assert_not_called()
+    assert len(overlay.store.rules())==before and overlay.engine.undo_stack==undo
+    assert "未能识别作者" in overlay.notice.text()
+    assert not overlay.engine.manual
 # An ineligible queued result must neither run OCR nor enter SQLite.
 overlay.store.set("threshold",4);overlay.refresh()
 expired=SkipEvent((123,10,20),100,4.5,"wheel",(None,99.9),5)
@@ -220,6 +231,16 @@ overlay.store.set("threshold",4);overlay.refresh()
 overlay.engine.pause(True)
 overlay.binding.target=(456,30,40)
 event=SkipEvent((123,10,20),100,3,"wheel",(None,99.9))
+for author in (""," \t\u200b","＠ ·"):
+    assert overlay.quick_skip.slots.acquire(blocking=False)
+    before=len(overlay.store.rules());undo=list(overlay.engine.undo_stack)
+    overlay.on_learned(event,{"target":"missing-author-target","author":author,"title":"有标题但没有作者"},"")
+    assert len(overlay.store.rules())==before and overlay.engine.undo_stack==undo
+    assert "未能识别作者" in overlay.notice.text()
+# Each rejected result must release its queue slot.
+for _ in range(8):assert overlay.quick_skip.slots.acquire(blocking=False)
+assert not overlay.quick_skip.slots.acquire(blocking=False)
+for _ in range(8):overlay.quick_skip.slots.release()
 assert overlay.quick_skip.slots.acquire(blocking=False)
 overlay.on_learned(event,{"target":caption_key("@示例视频作者","三秒内划走的数码评测"),"author":"@示例视频作者","title":"三秒内划走的数码评测"},"")
 overlay.refresh()

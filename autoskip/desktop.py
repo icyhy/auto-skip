@@ -103,7 +103,8 @@ class DesktopReader:
             # Keep only the frame stream warm. No UIA, OCR or inference during viewing.
             self.cached=None
             return None,None,f"监听中 · 仅切换间隔小于 {config.get('threshold',5):g} 秒时解析"
-        automatic=config.get("mode")=="auto" or statistics
+        reparse=config.get("mode")=="reparse"
+        automatic=config.get("mode")=="auto" or statistics or reparse
         switch_at=max(self.input.last_next,config.get("video_switch_at",0.0))
         if switch_at!=self.switch_at:
             self.departing_token=self.previous.token if self.previous else ""
@@ -123,7 +124,7 @@ class DesktopReader:
         bounds=analysis_bounds(image.size,config)
         if self.analysis_context!=bounds:
             self.cached=None;self.analysis_context=bounds
-        if automatic and self.cached:
+        if automatic and self.cached and not reparse:
             # Keep checking window/frame health, but never OCR a known video again.
             # The cached time is not a fresh playback/end observation.
             snap,jpeg,note=self.cached
@@ -139,7 +140,7 @@ class DesktopReader:
             image=image.crop(bounds)
         texts=[item["name"] for item in controls if item["name"]]
         links=[item["link"] for item in controls if item["link"]]
-        if automatic:
+        if automatic and not reparse:
             if self.fast_ocr is None:
                 from .fast_ocr import FastOCR
                 self.fast_ocr=FastOCR()
@@ -159,7 +160,7 @@ class DesktopReader:
         video_id="dy:video:"+next(iter(video_ids)) if len(video_ids)==1 else ""
         author,title=caption_fields(ocr_text)
         if not author:author,title=caption_fields(text)
-        if automatic and author:
+        if automatic and author and not reparse:
             author=self.fast_ocr.verify_author(image,author,config.get("blocked_authors",[]))
         # A whole-window profile link can belong to navigation or a recommendation.
         # Associate IDs only with a link explicitly named after the recognized author.
@@ -181,6 +182,7 @@ class DesktopReader:
         user_from=self.previous.token if self.previous and not same and now-self.input.last_next<1.8 else ""
         snap=Snapshot("desktop",windows.target_session(target),token,video_id,author_id,title,author,text[:8000],
                       True,playing,bool(times),ended,user_from,purchase_evidence(ocr_text),"\n".join(extract_links(urls)))
+        if reparse:snap=replace(snap,playing=False,timing=False,ended=False,user_from="")
         self.previous,self.times,self.last_time=snap,times,now
         waiting=automatic and token==self.departing_token and (
             config.get("pending_token")==token or now-switch_at<1.2)
@@ -190,7 +192,7 @@ class DesktopReader:
         stream=io.BytesIO();image.convert("RGB").save(stream,"JPEG",quality=80)
         note="已绑定抖音窗口 · 整窗识别"
         if bounds!=(0,0,*self.frame_size):note="已绑定抖音窗口 · 已排除边缘区域"
-        if automatic:note=f"自动识别 · {self.fast_ocr.backend} {self.fast_ocr.last_ms:.0f} ms"
+        if automatic and not reparse:note=f"自动识别 · {self.fast_ocr.backend} {self.fast_ocr.last_ms:.0f} ms"
         if not author_id:note+=" · 按完整作者名匹配"
         if automatic and author and not waiting:
             note="已识别作者 · 等待视频切换"

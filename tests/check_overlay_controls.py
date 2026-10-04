@@ -5,7 +5,9 @@ import time
 import uuid
 from pathlib import Path
 from unittest.mock import patch
+from copy import deepcopy
 import numpy as np
+from PIL import Image
 
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 os.environ["QT_QPA_PLATFORM"]="offscreen"
@@ -26,6 +28,51 @@ def geometry():
     return (overlay.size().width(),overlay.size().height(),
         [(b.text(),b.mapTo(overlay,b.rect().topLeft()).x(),b.mapTo(overlay,b.rect().topLeft()).y(),b.width(),b.height()) for b in buttons])
 initial=geometry()
+# The main preview is an icon immediately before Start, usable while paused.
+top=overlay.pause_button.parentWidget().layout().itemAt(0).layout()
+assert top.indexOf(overlay.region_button)+1==top.indexOf(overlay.pause_button)
+assert not overlay.region_button.icon().isNull() and overlay.region_button.accessibleName()
+QTest.mouseClick(overlay.pause_button,Qt.MouseButton.LeftButton)
+assert not overlay.engine.paused and not overlay.region_preview.isVisible()
+QTest.mouseClick(overlay.pause_button,Qt.MouseButton.LeftButton)
+saved_config=deepcopy(overlay.config);pending=[]
+profile={"name":"测试播放器","process":"player.exe","regions":[{"direction":"left","span":30},{"direction":"bottom","span":100}]}
+overlay.config["player_profiles"].append(profile);overlay.config["player_type"]=profile["name"]
+with patch.object(overlay.desktop_executor,"submit",side_effect=lambda work:pending.append(work)),\
+     patch("autoskip.windows.find_player_window",return_value=(123,10,20)) as find,\
+     patch("autoskip.app.capture_region",return_value=(Image.new("RGB",(870,500),"blue"),(30,0,900,500))) as capture,\
+     patch("autoskip.windows.user32.SetWindowPos",return_value=True):
+    QTest.mouseClick(overlay.region_button,Qt.MouseButton.RightButton)
+    assert not pending and not overlay.region_preview.isVisible()
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton)
+    request=overlay.region_request;pending.pop()();app.processEvents()
+    assert overlay.engine.paused and overlay.region_preview.isVisible()
+    assert find.call_args.args[0]=="player.exe"
+    assert capture.call_args.args[1]=={"player_type":profile["name"],"player_profiles":[profile]}
+    rendered=overlay.region_preview.grab().toImage()
+    assert rendered.pixelColor(1,1).name()=="#00ff00"
+    assert rendered.pixelColor(rendered.width()//2,rendered.height()//2).alpha()==0
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton)
+    assert not overlay.region_preview.isVisible()
+    overlay.region_captured.emit(request,(30,0,900,500),"")
+    assert not overlay.region_preview.isVisible(),"A late frame must not resurrect the border"
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton)
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton)
+    capture.reset_mock();pending.pop()();capture.assert_not_called()
+    find.side_effect=ValueError("未找到播放器")
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton);pending.pop()()
+    assert overlay.notice.text()=="未找到播放器" and not overlay.region_preview.isVisible()
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton);find.side_effect=None
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton);pending.pop()()
+    assert overlay.region_preview.isVisible()
+    overlay.hide();assert not overlay.region_preview.isVisible()
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton);overlay.show();app.processEvents()
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton);request=overlay.region_request
+    overlay.reload_settings();pending.pop(0)()
+    overlay.region_captured.emit(request,(30,0,900,500),"")
+    assert not overlay.region_preview.isVisible(),"Changed settings must invalidate old bounds"
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton)
+overlay.config=saved_config;overlay.notice_until=0;overlay.refresh();pending.clear()
 for text in ["短", "很长的识别内容"*100, "第一行\n第二行\n第三行\n"*30, ""]:
     overlay.engine.status=text
     overlay.engine.current=Snapshot("desktop","test","v",author="@作者",title=text)
@@ -38,7 +85,8 @@ QTest.mouseClick(overlay.fold_button,Qt.MouseButton.LeftButton);app.processEvent
 assert overlay.details.isHidden() and overlay.height()<initial[1]
 assert overlay.fold_button.text()=="+" and overlay.fold_button.toolTip()=="显示解析文字"
 assert overlay.auto_skip_switch.isVisible() and overlay.bind_button.isVisible()
-assert all(b.isVisible() for b in buttons)
+assert all(b.isVisible() for b in buttons if b is not overlay.reparse_button)
+assert not overlay.reparse_button.isVisible()
 overlay.engine.status="折叠后的长内容"*100;overlay.refresh();app.processEvents()
 assert overlay.details.isHidden() and overlay.height()==overlay.collapsed_height
 QTest.mouseClick(overlay.fold_button,Qt.MouseButton.LeftButton);app.processEvents()

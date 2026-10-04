@@ -1,4 +1,7 @@
 import unittest
+import json
+import sqlite3
+from copy import deepcopy
 from dataclasses import replace
 from unittest.mock import patch, Mock
 
@@ -175,6 +178,84 @@ class WatchStatistics(unittest.TestCase):
         finally:
             assert folder.resolve().is_relative_to(root.resolve())
             shutil.rmtree(folder)
+
+    def test_record_backup_roundtrip_retains_legacy_metadata_and_identical_visits(self):
+        for seconds in (3,5,10,10):self.store.save_watch(self.video,seconds)
+        self.store.save_watch(replace(self.video,source="desktop",video_id="",title="",author=""),8)
+        self.store.db.execute("UPDATE watches SET duration_basis='legacy' WHERE id=1")
+        backup=json.loads(json.dumps(self.store.export_watches(),ensure_ascii=False))
+        self.assertEqual(len(backup["watches"]),5)
+        self.assertNotIn("id",backup["watches"][0])
+        restored=Store(":memory:");self.addCleanup(restored.db.close)
+        self.assertEqual(restored.import_watches(backup),5)
+        self.assertEqual(restored.export_watches(),backup)
+        self.assertEqual(restored.statistics(),self.store.statistics())
+        self.assertEqual(restored.historical_watch(self.video),self.store.historical_watch(self.video))
+        self.assertEqual(restored.import_watches(backup),0)
+        self.assertEqual(restored.statistics()["count"],4)
+        restored.set("threshold",10)
+        self.assertEqual(restored.statistics()["valid_count"],0)
+
+    def test_record_import_merges_existing_visits_and_preserves_repeated_occurrences(self):
+        self.store.save_watch(self.video,10)
+        backup=self.store.export_watches()
+        backup["watches"]*=2
+        backup["watches"].append({**backup["watches"][0],"seconds":20})
+        self.store.save_watch(replace(self.video,title="旅行风景"),30)
+        self.assertEqual(self.store.import_watches(backup),2)
+        self.assertEqual(self.store.statistics()["count"],4)
+        self.assertEqual(self.store.statistics()["seconds"],70)
+        self.assertEqual(self.store.import_watches(backup),0)
+
+    def test_invalid_backups_leave_all_records_unchanged(self):
+        self.store.save_watch(self.video,10)
+        before=self.store.export_watches()
+        good={**before["watches"][0],"seconds":20}
+        for data in (None,[],{}, {**before,"format":"other"},{**before,"version":2},
+                     {**before,"version":True},{**before,"version":1.0},{**before,"watches":{}}):
+            with self.subTest(data=data),self.assertRaises(ValueError):self.store.import_watches(data)
+        bad_rows=[None,[],{}, {key:value for key,value in good.items() if key!="caption_key"}]
+        bad_rows += [{**good,key:value} for key,value in (
+            ("created","bad date"),("created","2026-02-30 12:00:00"),("title",None),("video_key",[]),
+            ("source","other"),("duration_basis","progress"),("seconds",True),("seconds","10"),
+            ("seconds",None),("seconds",[]),("seconds",0),("seconds",-1),("seconds",float("nan")),
+            ("seconds",float("inf")),("seconds",10**400))]
+        for row in bad_rows:
+            with self.subTest(row=row),self.assertRaisesRegex(ValueError,"第 2 条"):
+                self.store.import_watches({**before,"watches":[good,row]})
+            self.assertEqual(self.store.export_watches(),before)
+        self.assertEqual(self.store.import_watches({**before,"watches":[{**good,"seconds":10**20}]}),1)
+
+    def test_database_failure_rolls_back_the_entire_import(self):
+        self.store.save_watch(self.video,10)
+        before=deepcopy(self.store.export_watches())
+        row=before["watches"][0]
+        self.store.db.execute("""CREATE TRIGGER reject_bad_watch BEFORE INSERT ON watches
+            WHEN NEW.title='reject' BEGIN SELECT RAISE(ABORT,'test failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.import_watches({**before,"watches":[{**row,"seconds":20},{**row,"title":"reject"}]})
+        self.assertEqual(self.store.export_watches(),before)
+
+    def test_reset_clears_all_watch_records_and_preserves_other_data(self):
+        self.store.save_watch(self.video,10)
+        self.store.save_watch(self.video,20)
+        self.store.db.execute("UPDATE watches SET duration_basis='legacy' WHERE id=2")
+        self.store.save_filter("作者","","","or")
+        self.store.set("threshold",8)
+        self.store.log("测试","作者","保留")
+        self.store.reserve_call(50)
+        rules,history=self.store.rules(),self.store.history()
+        self.store.reset_watches()
+        self.assertEqual(self.store.export_watches()["watches"],[])
+        self.assertEqual(self.store.statistics()["count"],0)
+        self.assertEqual(self.store.statistics()["skipped"]["count"],0)
+        self.assertIsNone(self.store.historical_watch(self.video))
+        self.assertEqual(self.store.rules(),rules)
+        self.assertEqual(self.store.history(),history)
+        self.assertEqual(self.store.get("threshold"),8)
+        self.assertEqual(self.store.calls(),1)
+        self.store.save_watch(self.video,15)
+        self.assertEqual(self.store.statistics()["seconds"],15)
 
 
 class DesktopWatchTiming(unittest.TestCase):
