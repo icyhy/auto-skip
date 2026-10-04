@@ -513,7 +513,12 @@ class Overlay(QWidget):
         self.subtitle=QLabel("自动识别观看窗口 · 本地优先");self.subtitle.setObjectName("muted");parsed.addWidget(self.subtitle,1)
         self.auto_skip_switch=QCheckBox("按历史时长自动跳过")
         self.auto_skip_switch.setToolTip("启用自动后可选择。优先使用同一视频的有效平均观看时长，其次使用匹配关键词类别的平均时长；无有效历史时继续观看。")
-        self.auto_skip_switch.toggled.connect(lambda enabled:self.set_auto_skip(enabled));layout.addWidget(self.auto_skip_switch)
+        self.auto_skip_switch.toggled.connect(lambda enabled:self.set_auto_skip(enabled))
+        watch_row=QHBoxLayout();layout.addLayout(watch_row);watch_row.addWidget(self.auto_skip_switch);watch_row.addStretch()
+        self.watch_duration=QLabel("00:00:00");self.watch_duration.setObjectName("muted")
+        self.watch_duration.setAccessibleName("当前视频观看时长")
+        self.watch_duration.setToolTip("当前视频观看时长（HH:mm:ss），切换视频后重新计时")
+        watch_row.addWidget(self.watch_duration)
         target_row=QHBoxLayout();layout.addLayout(target_row)
         self.target_label=QLabel("自动查找抖音窗口");self.target_label.setObjectName("muted");target_row.addWidget(self.target_label,1)
         self.bind_button=button("绑定窗口",self.pick_window);target_row.addWidget(self.bind_button)
@@ -602,6 +607,8 @@ class Overlay(QWidget):
             switch.blockSignals(True);switch.setChecked(enabled);switch.blockSignals(False)
         self.auto_skip_switch.blockSignals(True);self.auto_skip_switch.setChecked(self.engine.auto_skip_enabled);self.auto_skip_switch.blockSignals(False)
         self.auto_skip_switch.setEnabled(self.engine.auto_enabled)
+        seconds=int(self.engine.views.elapsed(self.engine.clock())) if not self.engine.paused else 0
+        self.watch_duration.setText(f"{seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}")
         self.pause_button.setText("开始" if self.engine.paused else "暂停")
         self.reparse_button.setEnabled(bool(self.binding.target) and self.accepts_source("desktop") and
             not (self.engine.paused or self.dialog_open or self.picking_at or self.manual_busy or self.engine.pending))
