@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import numpy as np
+from PIL import Image
 from autoskip.capture import WindowCapture
 from autoskip.core import caption_key
 from autoskip.learning import QuickSkip, ScreenshotAnalyzer, SkipEvent, qualifies
@@ -23,6 +24,33 @@ class FastLearning(unittest.TestCase):
         self.capture.frame=(image,at)
 
     def wheel(self,at):self.input.mouse_event("wheel",123,10,10,at,delta=-120)
+
+    def test_capture_stream_returns_pixels_without_system_border(self):
+        callbacks={};native=Mock();control=Mock();control.is_finished.return_value=False
+        def event(callback):callbacks[callback.__name__]=callback;return callback
+        def start():
+            callbacks["on_frame_arrived"](Mock(frame_buffer=np.full((20,30,3),(0,0,255),dtype=np.uint8)),control)
+            return control
+        native.event.side_effect=event;native.start_free_threaded.side_effect=start
+        with patch("autoskip.capture.sys.getwindowsversion",return_value=Mock(build=22000)),\
+             patch("windows_capture.WindowsCapture",return_value=native) as create:
+            image,_=self.capture.snapshot(123)
+            create.assert_called_once_with(window_hwnd=123,cursor_capture=False,draw_border=False)
+            self.assertEqual(image.size,(30,20));self.assertEqual(image.getpixel((0,0)),(255,0,0))
+            self.capture.close();control.stop.assert_called_once()
+
+    def test_windows_10_capture_keeps_fresh_immutable_frames_and_stops_on_close(self):
+        with patch("autoskip.capture.sys.getwindowsversion",return_value=Mock(build=19045)),\
+             patch("autoskip.capture.print_window",return_value=Image.new("RGB",(30,20),"red")),\
+             patch("windows_capture.WindowsCapture") as wgc:
+            image,at=self.capture.snapshot(123)
+            self.assertEqual(image.getpixel((0,0)),(255,0,0))
+            frame=self.capture.freeze(123,at)
+            self.assertIsNotNone(frame);self.assertFalse(frame[0].flags.writeable)
+            stop=self.capture.legacy_stop;self.capture.close()
+            self.assertTrue(stop.is_set());self.assertIsNone(self.capture.freeze(123,at))
+            self.capture.snapshot(456);self.assertEqual(self.capture.hwnd,456)
+            self.capture.close();wgc.assert_not_called()
 
     def test_freezes_previous_video_before_slow_ocr_then_matches_again(self):
         self.wheel(100);self.assertEqual(self.output,[])
@@ -189,6 +217,18 @@ class FastLearning(unittest.TestCase):
         self.wheel(100);self.frame(102.9,20);self.wheel(103)
         analyzer=ScreenshotAnalyzer();analyzer.ocr=Mock(return_value=([],None))
         with self.assertRaises(ValueError):analyzer.analyze(self.output[-1][0])
+
+    def test_title_without_recognized_author_is_not_learned(self):
+        self.wheel(100);self.frame(102.9,20);self.wheel(103)
+        analyzer=ScreenshotAnalyzer()
+        for rows in (["划走前的视频标题"],["＠ ·","划走前的视频标题"]):
+            with self.subTest(rows=rows):
+                analyzer.ocr=Mock(return_value=([[[],line,.99] for line in rows],None))
+                with self.assertRaisesRegex(ValueError,"未能.*识别作者"):
+                    analyzer.analyze(self.output[-1][0])
+        analyzer.ocr=Mock(return_value=([[[],"@旧作者",.79],[[],"划走前的视频标题",.99]],None))
+        with self.assertRaisesRegex(ValueError,"未能.*识别作者"):
+            analyzer.analyze(self.output[-1][0])
 
 
 if __name__=="__main__":unittest.main()

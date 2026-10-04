@@ -1,7 +1,8 @@
 import json
 import math
 import sqlite3
-from datetime import date
+from collections import Counter
+from datetime import date, datetime
 from pathlib import Path
 from .core import INVALID_AUTHOR_IDS,author_name,author_name_key,video_link
 from .players import DEFAULT_PLAYER
@@ -19,6 +20,8 @@ DEFAULTS = {
     "hotkeys": {"pause": "Ctrl+Alt+P", "block": "Ctrl+Alt+B",
                 "undo": "Ctrl+Alt+Z", "auto": "Ctrl+Alt+M", "listen": "Ctrl+Alt+L", "show": "Ctrl+Alt+O"},
 }
+
+WATCH_FIELDS = ("created", "video_key", "caption_key", "author", "title", "source", "seconds", "duration_basis")
 
 
 class Store:
@@ -176,6 +179,44 @@ class Store:
                 return self.db.execute("INSERT INTO watches(video_key,caption_key,author,title,source,seconds,duration_basis) VALUES (?,?,?,?,?,?,'switch')",values).lastrowid
             self.db.execute("UPDATE watches SET video_key=?,caption_key=?,author=?,title=?,source=?,seconds=?,duration_basis='switch' WHERE id=?",(*values,watch_id))
         return watch_id
+
+    def export_watches(self):
+        rows=self.db.execute(f"SELECT {','.join(WATCH_FIELDS)} FROM watches ORDER BY id").fetchall()
+        return {"format":"autoskip-watches","version":1,"watches":[dict(row) for row in rows]}
+
+    def import_watches(self, data):
+        if (not isinstance(data,dict) or data.get("format")!="autoskip-watches"
+                or type(data.get("version")) is not int or data["version"]!=1 or not isinstance(data.get("watches"),list)):
+            raise ValueError("请选择 Auto Skip 导出的观看记录 JSON 文件（版本 1）")
+        records=[]
+        for index,row in enumerate(data["watches"],1):
+            try:
+                if not isinstance(row,dict):raise ValueError
+                if any(not isinstance(row[field],str) for field in WATCH_FIELDS if field!="seconds"):raise ValueError
+                datetime.strptime(row["created"],"%Y-%m-%d %H:%M:%S")
+                if row["source"] not in {"chrome","desktop"} or row["duration_basis"] not in {"switch","legacy"}:raise ValueError
+                if type(row["seconds"]) not in {int,float}:raise ValueError
+                seconds=float(row["seconds"])
+                if not math.isfinite(seconds) or seconds<=0:raise ValueError
+                values=tuple(seconds if field=="seconds" else row[field] for field in WATCH_FIELDS)
+            except (KeyError,ValueError,OverflowError):
+                raise ValueError(f"第 {index} 条观看记录无效，未导入任何记录") from None
+            records.append(values)
+        # Match occurrence counts so a backup can retain genuinely identical visits.
+        existing=Counter(tuple(row[field] for field in WATCH_FIELDS) for row in self.export_watches()["watches"])
+        added=0
+        with self.db:
+            for values in records:
+                if existing[values]:
+                    existing[values]-=1
+                    continue
+                self.db.execute(f"INSERT INTO watches({','.join(WATCH_FIELDS)}) VALUES ({','.join('?' for _ in WATCH_FIELDS)})",values)
+                added+=1
+        return added
+
+    def reset_watches(self):
+        with self.db:
+            self.db.execute("DELETE FROM watches")
 
     def statistics(self, exclude=None):
         from .statistics import categories

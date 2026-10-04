@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor,QPainter
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication,QWidget,QTabWidget
 from autoskip.app import Overlay,Settings
+from autoskip.capture import print_window
 
 
 class SamplePlayer(QWidget):
@@ -32,6 +33,12 @@ settings=Settings(overlay);settings.findChild(QTabWidget).setCurrentIndex(2)
 settings.move(100,100);settings.show();QTest.qWait(200)
 target=windows.window_identity(int(player.winId()),windows.process_name(int(player.winId())))
 overlay.binding.target=target
+image=print_window(int(player.winId()))
+assert image.getpixel((450,300))==(32,64,128),"The occluded player must render its own pixels"
+windows.user32.GetGuiResources.argtypes=[ctypes.c_void_p,ctypes.c_uint]
+handles=windows.user32.GetGuiResources(windows.kernel32.GetCurrentProcess(),0)
+for _ in range(20):print_window(int(player.winId()))
+assert windows.user32.GetGuiResources(windows.kernel32.GetCurrentProcess(),0)==handles,"Capture leaked GDI handles"
 settings.player_process.setText(windows.process_name(int(player.winId())))
 # Test fresh unsaved exclusions on all four sides.
 settings.regions.setRowCount(0)
@@ -68,7 +75,32 @@ try:
     deadline=time.monotonic()+1.2
     while time.monotonic()<deadline:QTest.qWait(20);time.sleep(0.01)
     assert not settings.region_preview.isVisible(),"A late capture resurrected the preview"
-    print("Native capture, physical bounds, green frame, click-through and release: PASS",actual)
+    settings.close()
+    # The floating-window button uses saved exclusions and only draws a transparent outline.
+    profile={"name":"测试播放器","process":windows.process_name(int(player.winId())),
+             "regions":[{"direction":d,"span":s} for d,s in [("left",30),("right",40),("top",20),("bottom",100)]]}
+    overlay.config["player_type"]=profile["name"];overlay.config["player_profiles"]=[profile]
+    overlay.move(1040,100);overlay.show();QTest.qWait(100)
+    QTest.mouseClick(overlay.pause_button,Qt.MouseButton.LeftButton)
+    assert not overlay.region_preview.isVisible(),"Start must not show a preview"
+    QTest.mouseClick(overlay.pause_button,Qt.MouseButton.LeftButton)
+    QTest.mousePress(overlay.region_button,Qt.MouseButton.LeftButton)
+    deadline=time.monotonic()+8
+    while not overlay.region_preview.isVisible() and time.monotonic()<deadline:
+        QTest.qWait(20);time.sleep(0.01)
+    assert overlay.region_preview.isVisible(),overlay.notice.text()
+    assert overlay.engine.paused and overlay.region_button.isDown()
+    assert windows.rect(int(overlay.region_preview.winId()))==expected
+    image=overlay.region_preview.grab().toImage()
+    assert image.pixelColor(edge,edge).name()=="#00ff00"
+    assert image.pixelColor(image.width()//2,image.height()//2).alpha()==0
+    image.save(str(output/"native-main-region-outline.png"))
+    overlay.grab().save(str(output/"native-main-region-button.png"))
+    center=((expected[0]+expected[2])//2,(expected[1]+expected[3])//2)
+    assert windows.window_at(*center)==int(player.winId()),"Outline blocks the player"
+    QTest.mouseRelease(overlay.region_button,Qt.MouseButton.LeftButton);QTest.qWait(50)
+    assert not windows.user32.IsWindowVisible(int(overlay.region_preview.winId()))
+    print("Native capture, physical bounds, green frame, transparent outline, click-through and release: PASS",actual)
 finally:
     settings.close();player.close();overlay.close()
     overlay.desktop_executor.shutdown(wait=True);overlay.learning_executor.shutdown(wait=True)
