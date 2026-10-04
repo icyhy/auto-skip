@@ -66,6 +66,7 @@ class Store:
                 self.db.execute("INSERT OR REPLACE INTO settings VALUES ('source','\"auto\"')")
                 self.db.execute("INSERT OR REPLACE INTO settings VALUES ('automatic_window_v1','true')")
         self.repair_author_rules()
+        self.repair_video_rules()
         legacy_mode=self.get("mode","listen")
         with self.db:
             for key,value in (("listen_enabled",legacy_mode!="auto"),("auto_enabled",legacy_mode=="auto")):
@@ -94,21 +95,37 @@ class Store:
         row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else DEFAULTS.get(key, fallback)
 
+    def repair_video_rules(self):
+        # Recover only recorded metadata tied to the same persistent video identity.
+        with self.db:
+            for rule in self.db.execute("SELECT * FROM rules WHERE kind='video' AND (author='' OR keyword='')").fetchall():
+                watch=self.db.execute("SELECT author,title FROM watches WHERE (video_key=? OR caption_key=?) "
+                                      "AND author!='' ORDER BY id DESC LIMIT 1",(rule["target"],rule["target"])).fetchone()
+                author=rule["author"] or (watch["author"] if watch else "")
+                keyword=rule["keyword"] or (watch["title"] if watch else "")
+                if not keyword and rule["target"].startswith("dy:video:") and rule["label"]!=rule["target"]:
+                    keyword=rule["label"]
+                if (author,keyword)!=(rule["author"],rule["keyword"]):
+                    self.db.execute("UPDATE rules SET author=?,keyword=? WHERE id=?",(author[:2000],keyword[:2000],rule["id"]))
+
     def set(self, key, value):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(value)))
 
-    def add_rule(self, kind, target, label, reason):
+    def add_rule(self, kind, target, label, reason, *, author="", keyword=""):
         if kind=="author" and target in INVALID_AUTHOR_IDS:target=author_name_key(label)
         if kind not in {"video", "author"} or not target or len(target) > 2000:
             raise ValueError("缺少可靠的屏蔽对象")
         old = self.db.execute("SELECT * FROM rules WHERE kind=? AND target=?", (kind, target)).fetchone()
+        author=(author or label or target) if kind=="author" else author
         with self.db:
             if old:
-                self.db.execute("UPDATE rules SET enabled=1 WHERE id=?", (old["id"],))
+                self.db.execute("UPDATE rules SET enabled=1,author=CASE WHEN author='' THEN ? ELSE author END,"
+                                "keyword=CASE WHEN keyword='' THEN ? ELSE keyword END WHERE id=?",
+                                (author[:2000],keyword[:2000],old["id"]))
                 return {"id": old["id"], "old_enabled": old["enabled"]}
-            cur = self.db.execute("INSERT INTO rules(kind,target,label,reason,author,link) VALUES (?,?,?,?,?,?)",
-                                  (kind, target, label[:500], reason[:1000],(label or target) if kind=="author" else "",video_link(target) if kind=="video" else ""))
+            cur = self.db.execute("INSERT INTO rules(kind,target,label,reason,author,keyword,link) VALUES (?,?,?,?,?,?,?)",
+                                  (kind,target,label[:500],reason[:1000],author[:2000],keyword[:2000],video_link(target) if kind=="video" else ""))
             return {"id": cur.lastrowid, "old_enabled": None}
 
     def save_filter(self, author, keyword, link, condition, rule_id=None):

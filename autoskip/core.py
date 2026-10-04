@@ -66,11 +66,10 @@ def link_key(value):
 
 
 def rule_matches(rule,snap):
-    author=rule["author"]
     if rule["kind"]=="author":
-        author_hit=bool(author) and author_matches(rule,snap)
-    else:
-        author_hit=bool(author) and author_name(author)==author_name(snap.author)
+        return bool(rule["author"]) and author_matches(rule,snap)
+    author=rule["author"]
+    author_hit=bool(author) and author_name(author)==author_name(snap.author)
     normalize=lambda text: re.sub(r"\s+","",unicodedata.normalize("NFKC",text)).casefold()
     keyword_hit=bool(rule["keyword"]) and normalize(rule["keyword"]) in normalize(snap.title+"\n"+snap.text)
     links=extract_links(snap.links+"\n"+snap.title+"\n"+snap.text)
@@ -78,6 +77,8 @@ def rule_matches(rule,snap):
     # Keep exact identities for older screenshot-learned videos that have no URL.
     if rule["kind"]=="video":links.append(caption_key(snap.author,snap.title))
     link_hit=bool(rule["link"]) and link_key(rule["link"]) in {link_key(link) for link in links if link}
+    # Saved video metadata is for display; blocking a video must not block its author.
+    if rule["kind"]=="video":return link_hit
     matches=(author_hit,keyword_hit,link_hit)
     return all(matches) if rule["condition"]=="and" else any(matches)
 
@@ -182,10 +183,10 @@ class Engine:
             # Toggling learning must not cancel a pending automatic skip.
             self.last_at=self.clock() if self.current else 0.0
 
-    def remember(self, kind, target, label, reason, *, author):
+    def remember(self, kind, target, label, reason, *, author, title=""):
         if not author_name(author):
             raise ValueError("未能识别作者，本次未加入黑名单")
-        change = self.store.add_rule(kind, target, label, reason)
+        change = self.store.add_rule(kind, target, label, reason, author=author, keyword=title)
         self.undo_stack.append(change)
         self.undo_stack = self.undo_stack[-30:]
         self.store.log("拉黑", label, reason)
@@ -207,7 +208,8 @@ class Engine:
         if kind=="author" and (not target or target in INVALID_AUTHOR_IDS):target=author_name_key(snap.author)
         if not target:
             raise ValueError("当前未取得可靠的" + ("作者账号标识" if kind == "author" else "视频标识") + "，未执行拉黑")
-        self.remember(kind, target, snap.author if kind == "author" else snap.title or target, "手动拉黑",author=snap.author)
+        self.remember(kind, target, snap.author if kind == "author" else snap.title or target, "手动拉黑",
+                      author=snap.author,title=snap.title if kind=="video" else "")
         self.manual = snap.key
         self.suppressed = None
 
@@ -245,7 +247,7 @@ class Engine:
                     and old.video_id and author_name(old.author) and old.timing and not old.ended
                     and self.pending is None and 0 < self.watched < threshold):
                 self.remember("video", old.video_id, old.title or old.video_id,
-                              f"手动跳过，观察到播放 {self.watched:.1f} 秒",author=old.author)
+                              f"手动跳过，观察到播放 {self.watched:.1f} 秒",author=old.author,title=old.title)
                 self.status = "已记住刚刚跳过的视频"
             self.watched = 0.0
             self.budget = self.budget_identity = None

@@ -20,7 +20,7 @@ test('content script: real DOM identity, safe switching, loops and user learning
       </div><button data-e2e="video-switch-next-arrow">下一条</button><textarea></textarea>
       <script>
       window.messages=[];window.callbacks=[];window.clicks=0;
-      window.chrome={runtime:{sendMessage:m=>{messages.push(m);return Promise.resolve()},onMessage:{addListener:f=>callbacks.push(f)}}};
+      window.chrome={runtime:{id:'test-extension',sendMessage:m=>{messages.push(m);return Promise.resolve()},onMessage:{addListener:f=>callbacks.push(f),removeListener:f=>{callbacks=callbacks.filter(item=>item!==f)}}}};
       const v=document.querySelector('video');window.playTime=3;
       Object.defineProperties(v,{duration:{get:()=>10},currentTime:{get:()=>window.playTime},readyState:{get:()=>4},paused:{get:()=>false},ended:{get:()=>false}});
       document.querySelector('[data-e2e="video-switch-next-arrow"]').onclick=()=>{clicks++};

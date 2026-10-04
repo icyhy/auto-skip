@@ -292,18 +292,29 @@ class RuleEditor(QDialog):
             field=getattr(self,name);field.setMaxLength(2000);form.addRow(label,field)
             if rule:field.setText(rule[name])
         if rule:
-            self.condition.setCurrentIndex(self.condition.findData(rule["condition"]))
+            if rule["kind"]=="video":
+                self.condition.addItem("仅此视频（按视频身份匹配）","video")
+            self.condition.setCurrentIndex(self.condition.findData("video" if rule["kind"]=="video" else rule["condition"]))
             if rule["kind"]=="video" and not rule["link"].startswith(("http://","https://","www.")):
                 self.link.clear();self.link.setPlaceholderText("历史视频无可用链接；编辑后请填写新的匹配内容")
         form.addRow("过滤条件",self.condition)
         note=QLabel("或：至少填写一项，任一项匹配即可。\n与：作者、关键词、链接均需填写，并且三项全部匹配。\n作者按完整名称匹配；关键词按包含匹配；链接按完整地址匹配。")
+        if rule and rule["kind"]=="video":
+            note.setText("当前仅拉黑此视频，作者和关键词保留用于查看。\n选择「或」或「与」后，可修改内容并转为组合过滤规则。\n"+note.text())
         note.setWordWrap(True);note.setObjectName("muted");layout.addWidget(note)
+        self.condition.currentIndexChanged.connect(self.update_fields);self.update_fields()
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.save);buttons.rejected.connect(self.reject);layout.addWidget(buttons)
 
+    def update_fields(self):
+        for name in ("author","keyword","link"):
+            getattr(self,name).setReadOnly(self.condition.currentData()=="video")
+
     def save(self):
+        if self.condition.currentData()=="video":
+            self.accept();return
         try:
             change=self.host.store.save_filter(self.author.text(),self.keyword.text(),self.link.text(),self.condition.currentData(),
                                               self.rule["id"] if self.rule else None)
@@ -341,7 +352,8 @@ class Rules(QDialog):
         for i,r in enumerate(self.rows):
             link=r["link"]
             if r["kind"]=="video" and not link.startswith(("http://","https://","www.")):link="已学习视频："+r["label"]
-            for j,value in enumerate([r["author"],r["keyword"],link,"与" if r["condition"]=="and" else "或","是" if r["enabled"] else "否",r["created"]]):
+            condition="仅视频" if r["kind"]=="video" else "与" if r["condition"]=="and" else "或"
+            for j,value in enumerate([r["author"],r["keyword"],link,condition,"是" if r["enabled"] else "否",r["created"]]):
                 item=QTableWidgetItem(value);item.setToolTip(value+"\n"+r["reason"]);self.table.setItem(i,j,item)
 
     def selected(self):
@@ -681,7 +693,8 @@ class Overlay(QWidget):
             if error:self.show_notice(error);return
             label=result["author"]+" "+result["title"]
             self.engine.remember("video",result["target"],label,
-                f"快速切换：{event.kind}，间隔 {event.elapsed:.3f} 秒，触发阈值 {event.threshold:g} 秒；划走前截图识别",author=result["author"])
+                f"快速切换：{event.kind}，间隔 {event.elapsed:.3f} 秒，触发阈值 {event.threshold:g} 秒；划走前截图识别",
+                author=result["author"],title=result["title"])
             self.show_notice(label+f" 视频被加入黑名单（切换间隔 {event.elapsed:.3f} 秒）")
         except ValueError as problem:self.show_notice(str(problem))
         finally:self.quick_skip.slots.release()
@@ -912,7 +925,7 @@ class Overlay(QWidget):
                 "statistics":True,
                 "video_switch_at":max(self.desktop_switch_at,self.ui_input.last_next),
                 "pending_token":self.engine.pending[0][2] if self.engine.pending else "",
-                "blocked_authors":[r["author"] for r in self.store.rules(enabled=True) if r["author"]]}
+                "blocked_authors":[r["author"] for r in self.store.rules(enabled=True) if r["kind"]!="video" and r["author"]]}
             def run():
                 try:snap,image,note=self.reader.read(config)
                 except ValueError as error:snap,image,note=None,None,str(error)
