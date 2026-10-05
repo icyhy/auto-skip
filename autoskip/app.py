@@ -112,6 +112,9 @@ class Settings(QDialog):
         form.addRow("观看入口",self.source)
         self.threshold=QDoubleSpinBox();self.threshold.setRange(0.5,60);self.threshold.setValue(app.store.get("threshold"));self.threshold.setSuffix(" 秒")
         form.addRow("快速跳过阈值",self.threshold)
+        self.favorite_threshold=QDoubleSpinBox();self.favorite_threshold.setRange(0.1,1440);self.favorite_threshold.setDecimals(2)
+        self.favorite_threshold.setValue(app.store.get("favorite_threshold")/60);self.favorite_threshold.setSuffix(" 分钟")
+        form.addRow("自动收藏观看阈值",self.favorite_threshold)
         self.opacity=QSlider(Qt.Orientation.Horizontal);self.opacity.setRange(35,100);self.opacity.setValue(int(app.store.get("opacity")*100))
         form.addRow("浮窗透明度",self.opacity)
         self.hotkeys={}
@@ -270,6 +273,7 @@ class Settings(QDialog):
             player_type=self.player_profiles[self.player_index]["name"]
             validate_profiles(self.player_profiles,player_type)
             for key,value in {"source":self.source.currentData(),"threshold":self.threshold.value(),
+                "favorite_threshold":self.favorite_threshold.value()*60,
                 "opacity":self.opacity.value()/100,"hotkeys":keys,
                 "player_type":player_type,"player_profiles":self.player_profiles}.items():
                 self.host.store.set(key,value)
@@ -381,6 +385,102 @@ class Rules(QDialog):
         box=QPlainTextEdit();box.setReadOnly(True)
         box.setPlainText("\n\n".join(f'{r["created"]} · {r["action"]}\n{r["label"]}\n{r["reason"]}' for r in self.host.store.history()))
         QVBoxLayout(dialog).addWidget(box);dialog.exec()
+
+
+class FavoriteEditor(QDialog):
+    def __init__(self, host, favorite, parent=None):
+        super().__init__(parent or host);self.host=host;self.favorite=favorite
+        self.setWindowTitle("编辑收藏");self.resize(580,280)
+        layout=QVBoxLayout(self);form=QFormLayout();layout.addLayout(form)
+        for name,label in (("author","作者"),("title","标题"),("category","类型"),("link","链接")):
+            field=QLineEdit(favorite[name]);field.setMaxLength(2000);setattr(self,name,field);form.addRow(label,field)
+        self.link.setPlaceholderText("未取得链接时，可在此补填 http:// 或 https:// 链接")
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.save);buttons.rejected.connect(self.reject);layout.addWidget(buttons)
+
+    def save(self):
+        try:
+            self.host.store.edit_favorite(self.favorite["id"],self.author.text(),self.title.text(),self.category.text(),self.link.text())
+            self.accept()
+        except (ValueError,sqlite3.Error) as error:QMessageBox.warning(self,"收藏未保存",str(error))
+
+
+class Favorites(QDialog):
+    def __init__(self, host):
+        super().__init__(host);self.host=host
+        self.setWindowTitle("Auto Skip · 收藏列表");self.resize(1060,540)
+        layout=QVBoxLayout(self)
+        self.search=QLineEdit();self.search.setPlaceholderText("搜索作者、标题、类型或链接")
+        self.search.textChanged.connect(self.refresh);layout.addWidget(self.search)
+        self.table=QTableWidget(0,7)
+        self.table.setHorizontalHeaderLabels(["作者","标题","类型","链接","观看时长","收藏时间","操作"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        for column in range(4):self.table.horizontalHeader().setSectionResizeMode(column,QHeaderView.ResizeMode.Stretch)
+        self.table.itemDoubleClicked.connect(lambda item:self.edit());layout.addWidget(self.table)
+        self.note=QLabel();self.note.setObjectName("muted");self.note.setTextFormat(Qt.TextFormat.PlainText)
+        self.note.setWordWrap(True);layout.addWidget(self.note)
+        row=QHBoxLayout();layout.addLayout(row)
+        row.addWidget(button("复制所选链接",self.copy_selected));row.addWidget(button("编辑收藏",self.edit))
+        row.addWidget(button("删除所选",self.delete));row.addWidget(button("清空收藏",self.clear))
+        row.addStretch();row.addWidget(button("刷新",self.refresh));row.addWidget(button("关闭",self.accept))
+        self.refresh()
+
+    def refresh(self):
+        query=self.search.text().strip().casefold()
+        all_rows=self.host.store.favorites()
+        self.rows=[row for row in all_rows if query in " ".join(row[key] for key in ("author","title","category","link")).casefold()]
+        for i in range(self.table.rowCount()):
+            control=self.table.cellWidget(i,6)
+            if control:control.hide()
+        self.table.clearContents()
+        self.table.setRowCount(len(self.rows))
+        for i,row in enumerate(self.rows):
+            seconds=int(row["seconds"])
+            values=(row["author"] or "未识别作者",row["title"],row["category"],row["link"] or "未取得链接",
+                    f"{seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}",row["created"])
+            for j,value in enumerate(values):
+                item=QTableWidgetItem(value);item.setToolTip(value);self.table.setItem(i,j,item)
+            copy=button("复制链接",lambda checked=False,link=row["link"]:self.copy_links([link]))
+            copy.setEnabled(bool(row["link"]));copy.setToolTip("复制此视频链接" if row["link"] else "未取得链接，可通过编辑补填")
+            self.table.setCellWidget(i,6,copy);self.table.setRowHeight(i,40)
+        self.note.setText(f"共 {len(all_rows)} 条收藏，当前显示 {len(self.rows)} 条。自动收藏阈值：严格超过 {self.host.store.get('favorite_threshold')/60:g} 分钟。"
+                          "收藏保存在本机；未取得链接的记录可通过编辑补填。")
+
+    def selected(self):
+        return [self.rows[index.row()] for index in sorted(self.table.selectionModel().selectedRows(),key=lambda index:index.row())]
+
+    def copy_links(self,links):
+        links=list(dict.fromkeys(link for link in links if link))
+        if not links:self.note.setText("所选收藏没有可复制的链接，请先编辑补填。");return
+        QApplication.clipboard().setText("\n".join(links));self.note.setText(f"已复制 {len(links)} 个链接。")
+
+    def copy_selected(self):
+        self.copy_links([row["link"] for row in self.selected()])
+
+    def edit(self):
+        rows=self.selected()
+        if len(rows)!=1:self.note.setText("请选择一条收藏进行编辑。");return
+        if FavoriteEditor(self.host,rows[0],self).exec():self.refresh()
+
+    def delete(self):
+        rows=self.selected()
+        if not rows:return
+        if QMessageBox.question(self,"删除收藏",f"删除所选的 {len(rows)} 条收藏？",
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.host.store.delete_favorites([row["id"] for row in rows]);self.refresh()
+
+    def clear(self):
+        rows=self.host.store.favorites()
+        if not rows:return
+        if QMessageBox.question(self,"清空收藏",f"清空全部 {len(rows)} 条收藏？此操作无法撤销。",
+                QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.host.store.delete_favorites([row["id"] for row in rows]);self.refresh()
 
 
 class Statistics(QDialog):
@@ -526,7 +626,9 @@ class Overlay(QWidget):
         self.auto_skip_switch=QCheckBox("按历史时长自动跳过")
         self.auto_skip_switch.setToolTip("启用自动后可选择。优先使用同一视频的有效平均观看时长，其次使用匹配关键词类别的平均时长；无有效历史时继续观看。")
         self.auto_skip_switch.toggled.connect(lambda enabled:self.set_auto_skip(enabled))
-        watch_row=QHBoxLayout();layout.addLayout(watch_row);watch_row.addWidget(self.auto_skip_switch);watch_row.addStretch()
+        watch_row=QHBoxLayout();layout.addLayout(watch_row);watch_row.addWidget(self.auto_skip_switch)
+        self.favorite_switch=QCheckBox("自动收藏");self.favorite_switch.toggled.connect(self.set_favorites)
+        watch_row.addWidget(self.favorite_switch);watch_row.addStretch()
         self.watch_duration=QLabel("00:00:00");self.watch_duration.setObjectName("muted")
         self.watch_duration.setAccessibleName("当前视频观看时长")
         self.watch_duration.setToolTip("当前视频观看时长（HH:mm:ss），切换视频后重新计时")
@@ -541,6 +643,7 @@ class Overlay(QWidget):
         block.setMenu(menu);actions.addWidget(block)
         actions.addWidget(button("黑名单",self.open_rules))
         actions.addWidget(button("观看统计",self.open_statistics))
+        actions.addWidget(button("收藏列表",self.open_favorites))
         more=QToolButton();more.setText("···");more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup);moremenu=QMenu(more)
         moremenu.addAction("设置",self.open_settings);moremenu.addAction("鼠标穿透（快捷键恢复）",self.enable_passthrough)
         moremenu.addAction("重新自动查找窗口",self.rediscover_window)
@@ -619,6 +722,8 @@ class Overlay(QWidget):
             switch.blockSignals(True);switch.setChecked(enabled);switch.blockSignals(False)
         self.auto_skip_switch.blockSignals(True);self.auto_skip_switch.setChecked(self.engine.auto_skip_enabled);self.auto_skip_switch.blockSignals(False)
         self.auto_skip_switch.setEnabled(self.engine.auto_enabled)
+        self.favorite_switch.blockSignals(True);self.favorite_switch.setChecked(self.engine.favorites_enabled);self.favorite_switch.blockSignals(False)
+        self.favorite_switch.setToolTip(f"独立于监听和自动过滤；观看当前视频严格超过 {self.store.get('favorite_threshold')/60:g} 分钟后加入本机收藏列表。阈值可在设置中修改。")
         seconds=int(self.engine.views.elapsed(self.engine.clock())) if not self.engine.paused else 0
         self.watch_duration.setText(f"{seconds//3600:02d}:{seconds//60%60:02d}:{seconds%60:02d}")
         self.pause_button.setText("开始" if self.engine.paused else "暂停")
@@ -633,7 +738,7 @@ class Overlay(QWidget):
         self.bind_button.setText("取消绑定" if self.picking_at else "绑定窗口")
 
     def sync_learning(self):
-        active=not self.engine.paused and not self.dialog_open and not self.picking_at and self.accepts_source("desktop") and (self.engine.listen_enabled or self.engine.auto_enabled)
+        active=not self.engine.paused and not self.dialog_open and not self.picking_at and self.accepts_source("desktop") and (self.engine.listen_enabled or self.engine.auto_enabled or self.engine.favorites_enabled)
         target=self.binding.target if active else None
         self.quick_skip.configure(target,active and self.engine.listen_enabled,float(self.store.get("threshold")))
         hwnd=target[0] if target else 0
@@ -705,14 +810,18 @@ class Overlay(QWidget):
 
     def set_listening(self,enabled):
         self.engine.set_features(listen=enabled);self.refresh()
-        if not self.engine.listen_enabled and not self.engine.auto_enabled:self.desktop_executor.submit(self.reader.close)
+        if not self.engine.listen_enabled and not self.engine.auto_enabled and not self.engine.favorites_enabled:self.desktop_executor.submit(self.reader.close)
 
     def set_automatic(self,enabled):
         self.engine.set_features(auto=enabled);self.refresh()
-        if not self.engine.listen_enabled and not self.engine.auto_enabled:self.desktop_executor.submit(self.reader.close)
+        if not self.engine.listen_enabled and not self.engine.auto_enabled and not self.engine.favorites_enabled:self.desktop_executor.submit(self.reader.close)
 
     def set_auto_skip(self,enabled):
         self.engine.set_features(auto_skip=enabled);self.refresh()
+
+    def set_favorites(self,enabled):
+        self.engine.set_features(favorites=enabled);self.refresh()
+        if not self.engine.listen_enabled and not self.engine.auto_enabled and not enabled:self.desktop_executor.submit(self.reader.close)
 
     def reparse(self):
         if not self.reparse_button.isEnabled():return
@@ -810,6 +919,7 @@ class Overlay(QWidget):
     def open_settings(self):self.dialog(Settings)
     def open_rules(self):self.dialog(Rules)
     def open_statistics(self):self.dialog(Statistics)
+    def open_favorites(self):self.dialog(Favorites)
 
     def new_rule(self):
         self.stop_region_preview()
@@ -902,7 +1012,7 @@ class Overlay(QWidget):
     def on_navigation(self,target,at):
         if not target or target!=self.binding.target or self.engine.paused or self.dialog_open or not self.accepts_source("desktop"):
             return
-        if not self.engine.listen_enabled and not self.engine.auto_enabled:return
+        if not self.engine.listen_enabled and not self.engine.auto_enabled and not self.engine.favorites_enabled:return
         self.auto_input_at=max(self.auto_input_at,at)
         if self.engine.views.switch("desktop",windows.target_session(target),at,manual=True):
             self.engine.reset(preserve_watch=True)
@@ -912,12 +1022,13 @@ class Overlay(QWidget):
     def tick(self):
         self.poll_binding()
         if self.engine.paused or self.dialog_open:self.refresh();return
-        if not self.engine.listen_enabled and not self.engine.auto_enabled:
-            self.engine.status="监听和自动均已关闭";self.refresh();return
+        if not self.engine.listen_enabled and not self.engine.auto_enabled and not self.engine.favorites_enabled:
+            self.engine.status="监听、自动和自动收藏均已关闭";self.refresh();return
         if self.accepts_source("desktop") and self.ui_input.last_next>self.auto_input_at:
             self.on_navigation(self.binding.target,self.ui_input.last_next)
         if self.engine.current and not self.engine.pending and not self.desktop_busy and not self.manual_busy and time.monotonic()-self.engine.last_at>2.5:
             self.engine.reset();self.engine.status="视频连接中断，等待重新识别"
+        if not self.manual_busy and self.engine.collect_favorite():self.show_notice("已自动加入收藏列表")
         if self.accepts_source("desktop") and not self.manual_busy:self.dispatch(self.engine.timed_action())
         if self.accepts_source("desktop") and not self.desktop_busy and not self.manual_busy and time.monotonic()>=self.desktop_next_at:
             self.desktop_busy=True;context=(self.engine.epoch,self.ui_input.last_next);config={**self.config,"desktop_target":self.binding.target,

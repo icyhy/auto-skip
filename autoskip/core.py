@@ -139,6 +139,7 @@ class Engine:
         self.listen_enabled = bool(store.get("listen_enabled"))
         self.auto_enabled = bool(store.get("auto_enabled"))
         self.auto_skip_enabled = bool(store.get("auto_skip_enabled"))
+        self.favorites_enabled = bool(store.get("favorites_enabled"))
         self.paused = True  # Starting the program never starts input injection.
         self.current = None
         self.last_at = 0.0
@@ -156,6 +157,7 @@ class Engine:
 
     def reset(self, preserve_watch=False):
         if not preserve_watch:self.views.discard()
+        else:self.views.suspend_favorite()
         self.epoch += 1
         self.current, self.pending, self.manual = None, None, None
         self.watched, self.last_at = 0.0, 0.0
@@ -166,18 +168,20 @@ class Engine:
         self.reset()
         self.status = "已暂停" if value else "等待视频画面"
 
-    def set_features(self, *, listen=None, auto=None, auto_skip=None):
-        if any(value is not None and not isinstance(value,bool) for value in (listen,auto,auto_skip)):
+    def set_features(self, *, listen=None, auto=None, auto_skip=None, favorites=None):
+        if any(value is not None and not isinstance(value,bool) for value in (listen,auto,auto_skip,favorites)):
             raise ValueError("功能开关必须为布尔值")
         old_listen,old_auto=self.listen_enabled,self.auto_enabled
         if listen is not None:self.listen_enabled=listen
         if auto is not None:self.auto_enabled=auto
+        if favorites is not None:self.favorites_enabled=favorites
         if auto_skip is not None:
             self.auto_skip_enabled=auto_skip
             self.budget = self.budget_identity = None
         self.store.set("listen_enabled",self.listen_enabled)
         self.store.set("auto_enabled",self.auto_enabled)
         self.store.set("auto_skip_enabled",self.auto_skip_enabled)
+        self.store.set("favorites_enabled",self.favorites_enabled)
         if old_auto!=self.auto_enabled:self.reset(preserve_watch=True)
         elif old_listen!=self.listen_enabled:
             # Toggling learning must not cancel a pending automatic skip.
@@ -254,6 +258,7 @@ class Engine:
             self.pending = self.manual = None
             self.suppressed = None
         self.current, self.last_at = snap, now
+        self.collect_favorite()
         if self.auto_enabled and self.auto_skip_enabled:
             from .statistics import identity
             metadata=(identity(snap),snap.author,snap.title)
@@ -280,9 +285,19 @@ class Engine:
             self.status = ("监听＋自动" if self.listen_enabled else "自动")+" · 继续观看"
             if self.auto_skip_enabled:
                 self.status+=f" · {self.views.elapsed(now):.1f}/{self.budget[0]:.1f} 秒" if self.budget else " · 暂无有效历史时长"
+        elif self.favorites_enabled:
+            self.status = "自动收藏中 · 继续观看"
+        if self.favorites_enabled and self.views.favorite_saved and not self.status.endswith(" · 已收藏"):
+            self.status+=" · 已收藏"
         return None
 
+    def collect_favorite(self):
+        if (self.paused or self.pending or not self.current or not self.current.active
+                or self.clock()-self.last_at>2):return False
+        return self.views.collect(self.clock())
+
     def timed_action(self):
+        self.collect_favorite()
         if self.current and self.suppressed==self.current.key:return None
         if self.auto_enabled and self.auto_skip_enabled and self.budget and self.views.elapsed(self.clock())>=self.budget[0]:
             return self.next_action(f"历史观看时长 {self.budget[0]:.1f} 秒（{self.budget[1]}）")

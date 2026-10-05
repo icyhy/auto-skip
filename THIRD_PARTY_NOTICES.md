@@ -7,7 +7,11 @@ Auto Skip's typed JEV category questions, direct TypeSafe request shape, frame/t
 - Upstream Windows integration credits [jev-chat-windows](https://github.com/jev-chat/jev-chat-windows).
 - Protocol checked against [TypeSafe API reference](https://docs.typesafe.ai/api).
 
-The implementation in this repository adapts the approach to video category filtering and retains the following source acknowledgements. The referenced authors do not endorse Auto Skip.
+The retained historical cloud/JEV implementation adapts the approach to video category filtering and retains the following source acknowledgements. The current filtering flow uses local rules and does not call the cloud/JEV implementation. The referenced authors do not endorse Auto Skip.
+
+## Android build tools
+
+The Android app uses Java and Android platform APIs without third-party application dependencies. `android/build.ps1` downloads Android SDK Platform 35 and Build Tools 35.0.0 from Google's official repository and checks the pinned archive hashes. The SDK tools are subject to the [Android SDK terms](https://developer.android.com/studio/terms); the project's MIT license does not replace those terms. SDK caches and development signing keys are not committed to this repository.
 
 ## MIT License notices
 

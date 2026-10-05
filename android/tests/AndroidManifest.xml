@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.autoskip.android.tests">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <application android:label="Auto Skip checks" />
+    <instrumentation android:name="com.autoskip.android.DeviceCheck" android:targetPackage="com.autoskip.android" />
+    <instrumentation android:name="com.autoskip.android.UiRead" android:targetPackage="com.autoskip.android.tests" />
+</manifest>

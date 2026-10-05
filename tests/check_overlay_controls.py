@@ -108,9 +108,12 @@ assert not overlay.engine.listen_enabled and overlay.engine.auto_enabled and not
 overlay.listen_switch.click();overlay.auto_switch.click()
 assert overlay.engine.listen_enabled and not overlay.engine.auto_enabled and overlay.quick_skip.enabled
 overlay.listen_switch.click()
+overlay.favorite_switch.click()
 with patch.object(overlay.desktop_executor,"submit") as submit,patch.object(overlay,"poll_binding"):
     overlay.tick();submit.assert_not_called()
 assert not overlay.engine.listen_enabled and not overlay.engine.auto_enabled and not overlay.quick_skip.enabled
+assert not overlay.engine.favorites_enabled
+overlay.favorite_switch.click()
 overlay.listen_switch.click();overlay.auto_switch.click()
 assert overlay.engine.listen_enabled and overlay.engine.auto_enabled
 

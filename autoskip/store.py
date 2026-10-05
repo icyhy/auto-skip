@@ -9,6 +9,7 @@ from .players import DEFAULT_PLAYER
 
 
 DEFAULTS = {
+    "favorites_enabled": True, "favorite_threshold": 300.0,
     "auto_skip_enabled": False,
     "listen_enabled": True, "auto_enabled": False, "threshold": 5.0, "opacity": 0.82,
     "source": "auto", "cloud_enabled": False,
@@ -46,6 +47,11 @@ class Store:
           title TEXT NOT NULL, source TEXT NOT NULL, seconds REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS watches_video ON watches(video_key);
         CREATE INDEX IF NOT EXISTS watches_caption ON watches(caption_key);
+        CREATE TABLE IF NOT EXISTS favorites (
+          id INTEGER PRIMARY KEY, created TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+          video_key TEXT NOT NULL UNIQUE, caption_key TEXT NOT NULL,
+          author TEXT NOT NULL, title TEXT NOT NULL, category TEXT NOT NULL,
+          link TEXT NOT NULL, source TEXT NOT NULL, seconds REAL NOT NULL);
         """)
         if "duration_basis" not in {row["name"] for row in self.db.execute("PRAGMA table_info(watches)")}:
             with self.db:
@@ -185,6 +191,56 @@ class Store:
 
     def history(self):
         return [dict(r) for r in self.db.execute("SELECT * FROM history ORDER BY id DESC LIMIT 100")]
+
+    def add_favorite(self, snap, seconds):
+        from .statistics import identity, categories
+        from .core import caption_key, extract_links, link_key
+        key=identity(snap)
+        if not key or not math.isfinite(seconds) or seconds<=0:return False
+        caption=caption_key(snap.author,snap.title)
+        # Only video URLs identify the saved video; profile/product links do not.
+        link=video_link(key) if key.startswith("dy:video:") else next(
+            (url for url in extract_links(snap.links+"\n"+snap.title+"\n"+snap.text)
+             if link_key(url).startswith("dy:video:")),"")
+        old=self.db.execute("SELECT * FROM favorites WHERE video_key=?",(key,)).fetchone()
+        if not old and caption:
+            candidates=self.db.execute("SELECT * FROM favorites WHERE caption_key=? AND "
+                "(video_key NOT LIKE 'dy:video:%' OR ? NOT LIKE 'dy:video:%')",(caption,key)).fetchall()
+            if len(candidates)==1:old=candidates[0]
+        with self.db:
+            if old:
+                self.db.execute("UPDATE favorites SET video_key=?,seconds=MAX(seconds,?),"
+                    "author=CASE WHEN author='' THEN ? ELSE author END,"
+                    "title=CASE WHEN title='' THEN ? ELSE title END,"
+                    "link=CASE WHEN link='' THEN ? ELSE link END WHERE id=?",
+                    (key if key.startswith("dy:video:") else old["video_key"],seconds,
+                     snap.author,snap.title,link,old["id"]))
+                return False
+            self.db.execute("INSERT INTO favorites(video_key,caption_key,author,title,category,link,source,seconds) "
+                "VALUES (?,?,?,?,?,?,?,?)",(key,caption,snap.author,snap.title,"、".join(categories(snap.title)),link,snap.source,seconds))
+        return True
+
+    def favorites(self):
+        return [dict(row) for row in self.db.execute("SELECT * FROM favorites ORDER BY id DESC")]
+
+    def edit_favorite(self, favorite_id, author, title, category, link):
+        from urllib.parse import urlsplit
+        values=(author,title,category,link)
+        if any(not isinstance(value,str) or len(value)>2000 for value in values):
+            raise ValueError("每项最多输入 2000 个字符")
+        author,title,category,link=(value.strip() for value in values)
+        if link:
+            try:
+                parts=urlsplit(link)
+                if parts.scheme not in {"http","https"} or not parts.hostname or any(c.isspace() for c in link):raise ValueError
+            except ValueError:raise ValueError("请输入完整的 http:// 或 https:// 链接") from None
+        with self.db:
+            self.db.execute("UPDATE favorites SET author=?,title=?,category=?,link=? WHERE id=?",
+                            (author,title,category or "未分类",link,favorite_id))
+
+    def delete_favorites(self, favorite_ids):
+        with self.db:
+            self.db.executemany("DELETE FROM favorites WHERE id=?",((value,) for value in favorite_ids))
 
     def save_watch(self, snap, seconds, watch_id=None):
         from .statistics import identity

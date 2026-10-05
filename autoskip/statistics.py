@@ -49,6 +49,29 @@ class WatchTracker:
 
     def discard(self):
         self.context=self.snap=self.started=self.observed_at=self.last_switch=None
+        self.favorite_saved=False
+        self.favorite_seconds=0.0
+        self.favorite_at=None
+
+    def suspend_favorite(self):
+        self.favorite_at=None
+
+    def advance_favorite(self,at):
+        if self.snap and self.favorite_at is not None:
+            delta=at-self.favorite_at
+            if 0<delta<=2 and self.snap.active and (self.snap.source=="desktop" or self.snap.playing):
+                # ponytail: desktop has no continuous pause signal; count available-window intervals.
+                self.favorite_seconds+=delta
+        self.favorite_at=at
+
+    def collect(self,at):
+        self.advance_favorite(at)
+        if self.favorite_saved or not self.snap or not self.store.get("favorites_enabled"):return False
+        seconds=self.favorite_seconds
+        if seconds<=float(self.store.get("favorite_threshold")) or not identity(self.snap):return False
+        added=self.store.add_favorite(self.snap,seconds)
+        self.favorite_saved=True
+        return added
 
     def switch(self,source,session,at,manual=False):
         if not math.isfinite(at):return False
@@ -57,15 +80,20 @@ class WatchTracker:
             self.discard();self.context=context
         if self.last_switch is not None and (at<=self.last_switch or (manual and at-self.last_switch<.7)):
             return False
+        self.collect(at)
         if self.started is not None and at>self.started:
             from .core import Snapshot
             snap=self.snap or Snapshot(source,session,"unknown")
             self.store.save_watch(snap,at-self.started)
         self.started=self.observed_at=self.last_switch=at
         self.snap=None
+        self.favorite_saved=False
+        self.favorite_seconds=0.0
+        self.favorite_at=at
         return True
 
     def observe(self,snap,at):
+        self.advance_favorite(at)
         context=(snap.source,snap.session)
         if self.context!=context:
             self.discard();self.context=context
